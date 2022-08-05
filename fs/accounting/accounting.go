@@ -3,6 +3,7 @@ package accounting
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -11,7 +12,6 @@ import (
 
 	"github.com/rclone/rclone/fs/rc"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/asyncreader"
 	"github.com/rclone/rclone/fs/fserrors"
@@ -19,7 +19,7 @@ import (
 
 // ErrorMaxTransferLimitReached defines error when transfer limit is reached.
 // Used for checking on exit and matching to correct exit code.
-var ErrorMaxTransferLimitReached = errors.New("Max transfer limit reached as set by --max-transfer")
+var ErrorMaxTransferLimitReached = errors.New("max transfer limit reached as set by --max-transfer")
 
 // ErrorMaxTransferLimitReachedFatal is returned from Read when the max
 // transfer limit is reached.
@@ -444,7 +444,7 @@ func (acc *Account) speed() (bps, current float64) {
 		return 0, 0
 	}
 	// Calculate speed from first read.
-	total := float64(time.Now().Sub(acc.values.start)) / float64(time.Second)
+	total := float64(time.Since(acc.values.start)) / float64(time.Second)
 	if total > 0 {
 		bps = float64(acc.values.bytes) / total
 	} else {

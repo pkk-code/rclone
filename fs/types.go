@@ -28,6 +28,10 @@ type Fs interface {
 
 	// NewObject finds the Object at remote.  If it can't be found
 	// it returns the error ErrorObjectNotFound.
+	//
+	// If remote points to a directory then it should return
+	// ErrorIsDir if possible without doing any extra work,
+	// otherwise ErrorObjectNotFound.
 	NewObject(ctx context.Context, remote string) (Object, error)
 
 	// Put in to the remote path with the modTime given of the given size
@@ -179,6 +183,14 @@ type GetTierer interface {
 	GetTier() string
 }
 
+// Metadataer is an optional interface for Object
+type Metadataer interface {
+	// Metadata returns metadata for an object
+	//
+	// It should return nil if there is no Metadata
+	Metadata(ctx context.Context) (Metadata, error)
+}
+
 // FullObjectInfo contains all the read-only optional interfaces
 //
 // Use for checking making wrapping ObjectInfos implement everything
@@ -188,6 +200,7 @@ type FullObjectInfo interface {
 	IDer
 	ObjectUnWrapper
 	GetTierer
+	Metadataer
 }
 
 // FullObject contains all the optional interfaces for Object
@@ -200,6 +213,7 @@ type FullObject interface {
 	ObjectUnWrapper
 	GetTierer
 	SetTierer
+	Metadataer
 }
 
 // ObjectOptionalInterfaces returns the names of supported and
@@ -227,6 +241,9 @@ func ObjectOptionalInterfaces(o Object) (supported, unsupported []string) {
 
 	_, ok = o.(GetTierer)
 	store(ok, "GetTier")
+
+	_, ok = o.(Metadataer)
+	store(ok, "Metadata")
 
 	return supported, unsupported
 }

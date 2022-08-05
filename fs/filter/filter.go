@@ -4,6 +4,7 @@ package filter
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -12,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"golang.org/x/sync/errgroup"
 )
@@ -86,7 +86,7 @@ type Opt struct {
 	FilterFrom     []string
 	ExcludeRule    []string
 	ExcludeFrom    []string
-	ExcludeFile    string
+	ExcludeFile    []string
 	IncludeRule    []string
 	IncludeFrom    []string
 	FilesFrom      []string
@@ -199,7 +199,7 @@ func NewFilter(opt *Opt) (f *Filter, err error) {
 
 	for _, rule := range f.Opt.FilesFrom {
 		if !inActive {
-			return nil, fmt.Errorf("The usage of --files-from overrides all other filters, it should be used alone or with --files-from-raw")
+			return nil, fmt.Errorf("the usage of --files-from overrides all other filters, it should be used alone or with --files-from-raw")
 		}
 		f.initAddFile() // init to show --files-from set even if no files within
 		err := forEachLine(rule, false, func(line string) error {
@@ -214,7 +214,7 @@ func NewFilter(opt *Opt) (f *Filter, err error) {
 		// --files-from-raw can be used with --files-from, hence we do
 		// not need to get the value of f.InActive again
 		if !inActive {
-			return nil, fmt.Errorf("The usage of --files-from-raw overrides all other filters, it should be used alone or with --files-from")
+			return nil, fmt.Errorf("the usage of --files-from-raw overrides all other filters, it should be used alone or with --files-from")
 		}
 		f.initAddFile() // init to show --files-from set even if no files within
 		err := forEachLine(rule, true, func(line string) error {
@@ -254,7 +254,7 @@ func (f *Filter) addDirGlobs(Include bool, glob string) error {
 		if dirGlob == "/" {
 			continue
 		}
-		dirRe, err := globToRegexp(dirGlob, f.Opt.IgnoreCase)
+		dirRe, err := GlobToRegexp(dirGlob, f.Opt.IgnoreCase)
 		if err != nil {
 			return err
 		}
@@ -274,7 +274,7 @@ func (f *Filter) Add(Include bool, glob string) error {
 	if strings.Contains(glob, "**") {
 		isDirRule, isFileRule = true, true
 	}
-	re, err := globToRegexp(glob, f.Opt.IgnoreCase)
+	re, err := GlobToRegexp(glob, f.Opt.IgnoreCase)
 	if err != nil {
 		return err
 	}
@@ -301,9 +301,9 @@ func (f *Filter) Add(Include bool, glob string) error {
 //
 // These are
 //
-//   + glob
 //   - glob
-//   !
+//   - glob
+//     !
 //
 // '+' includes the glob, '-' excludes it and '!' resets the filter list
 //
@@ -318,7 +318,7 @@ func (f *Filter) AddRule(rule string) error {
 	case strings.HasPrefix(rule, "+ "):
 		return f.Add(true, rule[2:])
 	}
-	return errors.Errorf("malformed rule %q", rule)
+	return fmt.Errorf("malformed rule %q", rule)
 }
 
 // initAddFile creates f.files and f.dirs
@@ -392,8 +392,10 @@ func (f *Filter) ListContainsExcludeFile(entries fs.DirEntries) bool {
 		obj, ok := entry.(fs.Object)
 		if ok {
 			basename := path.Base(obj.Remote())
-			if basename == f.Opt.ExcludeFile {
-				return true
+			for _, excludeFile := range f.Opt.ExcludeFile {
+				if basename == excludeFile {
+					return true
+				}
 			}
 		}
 	}
@@ -436,12 +438,14 @@ func (f *Filter) IncludeDirectory(ctx context.Context, fs fs.Fs) func(string) (b
 // empty string (for testing).
 func (f *Filter) DirContainsExcludeFile(ctx context.Context, fremote fs.Fs, remote string) (bool, error) {
 	if len(f.Opt.ExcludeFile) > 0 {
-		exists, err := fs.FileExists(ctx, fremote, path.Join(remote, f.Opt.ExcludeFile))
-		if err != nil {
-			return false, err
-		}
-		if exists {
-			return true, nil
+		for _, excludeFile := range f.Opt.ExcludeFile {
+			exists, err := fs.FileExists(ctx, fremote, path.Join(remote, excludeFile))
+			if err != nil {
+				return false, err
+			}
+			if exists {
+				return true, nil
+			}
 		}
 	}
 	return false, nil
@@ -592,15 +596,15 @@ func (f *Filter) UsesDirectoryFilters() bool {
 	}
 	rule := f.dirRules.rules[0]
 	re := rule.Regexp.String()
-	if rule.Include == true && re == "^.*$" {
+	if rule.Include && re == "^.*$" {
 		return false
 	}
 	return true
 }
 
+// Context key for config
 type configContextKeyType struct{}
 
-// Context key for config
 var configContextKey = configContextKeyType{}
 
 // GetConfig returns the global or context sensitive config
@@ -644,4 +648,30 @@ func AddConfig(ctx context.Context) (context.Context, *Filter) {
 func ReplaceConfig(ctx context.Context, f *Filter) context.Context {
 	newCtx := context.WithValue(ctx, configContextKey, f)
 	return newCtx
+}
+
+// Context key for the "use filter" flag
+type useFlagContextKeyType struct{}
+
+var useFlagContextKey = useFlagContextKeyType{}
+
+// GetUseFilter obtains the "use filter" flag from context
+// The flag tells filter-aware backends (Drive) to constrain List using filter
+func GetUseFilter(ctx context.Context) bool {
+	if ctx != nil {
+		if pVal := ctx.Value(useFlagContextKey); pVal != nil {
+			return *(pVal.(*bool))
+		}
+	}
+	return false
+}
+
+// SetUseFilter returns a context having (re)set the "use filter" flag
+func SetUseFilter(ctx context.Context, useFilter bool) context.Context {
+	if useFilter == GetUseFilter(ctx) {
+		return ctx // Minimize depth of nested contexts
+	}
+	pVal := new(bool)
+	*pVal = useFilter
+	return context.WithValue(ctx, useFlagContextKey, pVal)
 }

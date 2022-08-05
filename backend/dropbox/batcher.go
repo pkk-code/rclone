@@ -8,13 +8,13 @@ package dropbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/dropbox/dropbox-sdk-go-unofficial/dropbox/async"
-	"github.com/dropbox/dropbox-sdk-go-unofficial/dropbox/files"
-	"github.com/pkg/errors"
+	"github.com/dropbox/dropbox-sdk-go-unofficial/v6/dropbox/async"
+	"github.com/dropbox/dropbox-sdk-go-unofficial/v6/dropbox/files"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/lib/atexit"
@@ -66,7 +66,7 @@ type batcherResponse struct {
 func newBatcher(ctx context.Context, f *Fs, mode string, size int, timeout time.Duration) (*batcher, error) {
 	// fs.Debugf(f, "Creating batcher with mode %q, size %d, timeout %v", mode, size, timeout)
 	if size > maxBatchSize || size < 0 {
-		return nil, errors.Errorf("dropbox: batch size must be < %d and >= 0 - it is currently %d", maxBatchSize, size)
+		return nil, fmt.Errorf("dropbox: batch size must be < %d and >= 0 - it is currently %d", maxBatchSize, size)
 	}
 
 	async := false
@@ -91,7 +91,7 @@ func newBatcher(ctx context.Context, f *Fs, mode string, size int, timeout time.
 	case "off":
 		size = 0
 	default:
-		return nil, errors.Errorf("dropbox: batch mode must be sync|async|off not %q", mode)
+		return nil, fmt.Errorf("dropbox: batch mode must be sync|async|off not %q", mode)
 	}
 
 	b := &batcher{
@@ -118,12 +118,12 @@ func (b *batcher) Batching() bool {
 }
 
 // finishBatch commits the batch, returning a batch status to poll or maybe complete
-func (b *batcher) finishBatch(ctx context.Context, items []*files.UploadSessionFinishArg) (batchStatus *files.UploadSessionFinishBatchLaunch, err error) {
+func (b *batcher) finishBatch(ctx context.Context, items []*files.UploadSessionFinishArg) (complete *files.UploadSessionFinishBatchResult, err error) {
 	var arg = &files.UploadSessionFinishBatchArg{
 		Entries: items,
 	}
 	err = b.f.pacer.Call(func() (bool, error) {
-		batchStatus, err = b.f.srv.UploadSessionFinishBatch(arg)
+		complete, err = b.f.srv.UploadSessionFinishBatchV2(arg)
 		// If error is insufficient space then don't retry
 		if e, ok := err.(files.UploadSessionFinishAPIError); ok {
 			if e.EndpointError != nil && e.EndpointError.Path != nil && e.EndpointError.Path.Tag == files.WriteErrorInsufficientSpace {
@@ -135,9 +135,9 @@ func (b *batcher) finishBatch(ctx context.Context, items []*files.UploadSessionF
 		return err != nil, err
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "batch commit failed")
+		return nil, fmt.Errorf("batch commit failed: %w", err)
 	}
-	return batchStatus, nil
+	return complete, nil
 }
 
 // finishBatchJobStatus waits for the batch to complete returning completed entries
@@ -147,8 +147,14 @@ func (b *batcher) finishBatchJobStatus(ctx context.Context, launchBatchStatus *f
 	}
 	var batchStatus *files.UploadSessionFinishBatchJobStatus
 	sleepTime := 100 * time.Millisecond
-	const maxTries = 120
-	for try := 1; try <= maxTries; try++ {
+	const maxSleepTime = 1 * time.Second
+	startTime := time.Now()
+	try := 1
+	for {
+		remaining := time.Duration(b.f.opt.BatchCommitTimeout) - time.Since(startTime)
+		if remaining < 0 {
+			break
+		}
 		err = b.f.pacer.Call(func() (bool, error) {
 			batchStatus, err = b.f.srv.UploadSessionFinishBatchCheck(&async.PollArg{
 				AsyncJobId: launchBatchStatus.AsyncJobId,
@@ -156,23 +162,25 @@ func (b *batcher) finishBatchJobStatus(ctx context.Context, launchBatchStatus *f
 			return shouldRetry(ctx, err)
 		})
 		if err != nil {
-			fs.Debugf(b.f, "Wait for batch: sleeping for %v after error: %v: try %d/%d", sleepTime, err, try, maxTries)
+			fs.Debugf(b.f, "Wait for batch: sleeping for %v after error: %v: try %d remaining %v", sleepTime, err, try, remaining)
 		} else {
 			if batchStatus.Tag == "complete" {
+				fs.Debugf(b.f, "Upload batch completed in %v", time.Since(startTime))
 				return batchStatus.Complete, nil
 			}
-			fs.Debugf(b.f, "Wait for batch: sleeping for %v after status: %q: try %d/%d", sleepTime, batchStatus.Tag, try, maxTries)
+			fs.Debugf(b.f, "Wait for batch: sleeping for %v after status: %q: try %d remaining %v", sleepTime, batchStatus.Tag, try, remaining)
 		}
 		time.Sleep(sleepTime)
 		sleepTime *= 2
-		if sleepTime > time.Second {
-			sleepTime = time.Second
+		if sleepTime > maxSleepTime {
+			sleepTime = maxSleepTime
 		}
+		try++
 	}
 	if err == nil {
 		err = errors.New("batch didn't complete")
 	}
-	return nil, errors.Wrapf(err, "wait for batch failed after %d tries", maxTries)
+	return nil, fmt.Errorf("wait for batch failed after %d tries in %v: %w", try, time.Since(startTime), err)
 }
 
 // commit a batch
@@ -191,30 +199,15 @@ func (b *batcher) commitBatch(ctx context.Context, items []*files.UploadSessionF
 	fs.Debugf(b.f, "Committing %s", desc)
 
 	// finalise the batch getting either a result or a job id to poll
-	batchStatus, err := b.finishBatch(ctx, items)
+	complete, err := b.finishBatch(ctx, items)
 	if err != nil {
 		return err
-	}
-
-	// check whether batch is complete
-	var complete *files.UploadSessionFinishBatchResult
-	switch batchStatus.Tag {
-	case "async_job_id":
-		// wait for batch to complete
-		complete, err = b.finishBatchJobStatus(ctx, batchStatus)
-		if err != nil {
-			return err
-		}
-	case "complete":
-		complete = batchStatus.Complete
-	default:
-		return errors.Errorf("batch returned unknown status %q", batchStatus.Tag)
 	}
 
 	// Check we got the right number of entries
 	entries := complete.Entries
 	if len(entries) != len(results) {
-		return errors.Errorf("expecting %d items in batch but got %d", len(results), len(entries))
+		return fmt.Errorf("expecting %d items in batch but got %d", len(results), len(entries))
 	}
 
 	// Report results to clients
@@ -242,7 +235,7 @@ func (b *batcher) commitBatch(ctx context.Context, items []*files.UploadSessionF
 					errorTag += "/" + item.Failure.PropertiesError.Tag
 				}
 			}
-			resp.err = errors.Errorf("batch upload failed: %s", errorTag)
+			resp.err = fmt.Errorf("batch upload failed: %s", errorTag)
 		}
 		if !b.async {
 			results[i] <- resp
@@ -253,7 +246,7 @@ func (b *batcher) commitBatch(ctx context.Context, items []*files.UploadSessionF
 
 	// Report an error if any failed in the batch
 	if errorTag != "" {
-		return errors.Errorf("batch had %d errors: last error: %s", errorCount, errorTag)
+		return fmt.Errorf("batch had %d errors: last error: %s", errorCount, errorTag)
 	}
 
 	fs.Debugf(b.f, "Committed %s", desc)
@@ -311,6 +304,9 @@ outer:
 //
 // Can be called from atexit handler
 func (b *batcher) Shutdown() {
+	if !b.Batching() {
+		return
+	}
 	b.shutOnce.Do(func() {
 		atexit.Unregister(b.atexit)
 		fs.Infof(b.f, "Commiting uploads - please wait...")

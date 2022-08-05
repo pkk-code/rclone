@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"mime"
@@ -14,17 +16,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkg/errors"
 	_ "github.com/rclone/rclone/backend/local"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/filter"
+	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/operations"
+	"github.com/rclone/rclone/fs/sync"
 	"github.com/rclone/rclone/fstest"
 	"github.com/rclone/rclone/fstest/fstests"
 	"github.com/rclone/rclone/lib/random"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/api/drive/v3"
+	"google.golang.org/api/googleapi"
 )
 
 func TestDriveScopes(t *testing.T) {
@@ -185,6 +190,60 @@ func TestExtensionsForImportFormats(t *testing.T) {
 			assert.NotEmpty(t, extensions, "No extension found for %q", fromMT)
 		}
 	}
+}
+
+func (f *Fs) InternalTestShouldRetry(t *testing.T) {
+	ctx := context.Background()
+	gatewayTimeout := googleapi.Error{
+		Code: 503,
+	}
+	timeoutRetry, timeoutError := f.shouldRetry(ctx, &gatewayTimeout)
+	assert.True(t, timeoutRetry)
+	assert.Equal(t, &gatewayTimeout, timeoutError)
+	generic403 := googleapi.Error{
+		Code: 403,
+	}
+	rLEItem := googleapi.ErrorItem{
+		Reason:  "rateLimitExceeded",
+		Message: "User rate limit exceeded.",
+	}
+	generic403.Errors = append(generic403.Errors, rLEItem)
+	oldStopUpload := f.opt.StopOnUploadLimit
+	oldStopDownload := f.opt.StopOnDownloadLimit
+	f.opt.StopOnUploadLimit = true
+	f.opt.StopOnDownloadLimit = true
+	defer func() {
+		f.opt.StopOnUploadLimit = oldStopUpload
+		f.opt.StopOnDownloadLimit = oldStopDownload
+	}()
+	expectedRLError := fserrors.FatalError(&generic403)
+	rateLimitRetry, rateLimitErr := f.shouldRetry(ctx, &generic403)
+	assert.False(t, rateLimitRetry)
+	assert.Equal(t, rateLimitErr, expectedRLError)
+	dQEItem := googleapi.ErrorItem{
+		Reason: "downloadQuotaExceeded",
+	}
+	generic403.Errors[0] = dQEItem
+	expectedDQError := fserrors.FatalError(&generic403)
+	downloadQuotaRetry, downloadQuotaError := f.shouldRetry(ctx, &generic403)
+	assert.False(t, downloadQuotaRetry)
+	assert.Equal(t, downloadQuotaError, expectedDQError)
+	tDFLEItem := googleapi.ErrorItem{
+		Reason: "teamDriveFileLimitExceeded",
+	}
+	generic403.Errors[0] = tDFLEItem
+	expectedTDFLError := fserrors.FatalError(&generic403)
+	teamDriveFileLimitRetry, teamDriveFileLimitError := f.shouldRetry(ctx, &generic403)
+	assert.False(t, teamDriveFileLimitRetry)
+	assert.Equal(t, teamDriveFileLimitError, expectedTDFLError)
+	qEItem := googleapi.ErrorItem{
+		Reason: "quotaExceeded",
+	}
+	generic403.Errors[0] = qEItem
+	expectedQuotaError := fserrors.FatalError(&generic403)
+	quotaExceededRetry, quotaExceededError := f.shouldRetry(ctx, &generic403)
+	assert.False(t, quotaExceededRetry)
+	assert.Equal(t, quotaExceededError, expectedQuotaError)
 }
 
 func (f *Fs) InternalTestDocumentImport(t *testing.T) {
@@ -375,9 +434,9 @@ func (f *Fs) InternalTestUnTrash(t *testing.T) {
 	// Make some objects, one in a subdir
 	contents := random.String(100)
 	file1 := fstest.NewItem("trashDir/toBeTrashed", contents, time.Now())
-	_, obj1 := fstests.PutTestContents(ctx, t, f, &file1, contents, false)
+	obj1 := fstests.PutTestContents(ctx, t, f, &file1, contents, false)
 	file2 := fstest.NewItem("trashDir/subdir/toBeTrashed", contents, time.Now())
-	_, _ = fstests.PutTestContents(ctx, t, f, &file2, contents, false)
+	_ = fstests.PutTestContents(ctx, t, f, &file2, contents, false)
 
 	// Check objects
 	checkObjects := func() {
@@ -419,11 +478,7 @@ func (f *Fs) InternalTestCopyID(t *testing.T) {
 	require.NoError(t, err)
 	o := obj.(*Object)
 
-	dir, err := ioutil.TempDir("", "rclone-drive-copyid-test")
-	require.NoError(t, err)
-	defer func() {
-		_ = os.RemoveAll(dir)
-	}()
+	dir := t.TempDir()
 
 	checkFile := func(name string) {
 		filePath := filepath.Join(dir, name)
@@ -461,6 +516,73 @@ func (f *Fs) InternalTestCopyID(t *testing.T) {
 	})
 }
 
+// TestIntegration/FsMkdir/FsPutFiles/Internal/AgeQuery
+func (f *Fs) InternalTestAgeQuery(t *testing.T) {
+	opt := &filter.Opt{}
+	err := opt.MaxAge.Set("1h")
+	assert.NoError(t, err)
+	flt, err := filter.NewFilter(opt)
+	assert.NoError(t, err)
+
+	defCtx := context.Background()
+	fltCtx := filter.ReplaceConfig(defCtx, flt)
+
+	testCtx1 := fltCtx
+	testCtx2 := filter.SetUseFilter(testCtx1, true)
+	testCtx3, testCancel := context.WithCancel(testCtx2)
+	testCtx4 := filter.SetUseFilter(testCtx3, false)
+	testCancel()
+	assert.False(t, filter.GetUseFilter(testCtx1))
+	assert.True(t, filter.GetUseFilter(testCtx2))
+	assert.True(t, filter.GetUseFilter(testCtx3))
+	assert.False(t, filter.GetUseFilter(testCtx4))
+
+	subRemote := fmt.Sprintf("%s:%s/%s", f.Name(), f.Root(), "agequery-testdir")
+	subFsResult, err := fs.NewFs(defCtx, subRemote)
+	require.NoError(t, err)
+	subFs, isDriveFs := subFsResult.(*Fs)
+	require.True(t, isDriveFs)
+
+	tempDir1 := t.TempDir()
+	tempFs1, err := fs.NewFs(defCtx, tempDir1)
+	require.NoError(t, err)
+
+	tempDir2 := t.TempDir()
+	tempFs2, err := fs.NewFs(defCtx, tempDir2)
+	require.NoError(t, err)
+
+	file1 := fstest.Item{ModTime: time.Now(), Path: "agequery.txt"}
+	_ = fstests.PutTestContents(defCtx, t, tempFs1, &file1, "abcxyz", true)
+
+	// validate sync/copy
+	const timeQuery = "(modifiedTime >= '"
+
+	assert.NoError(t, sync.CopyDir(defCtx, subFs, tempFs1, false))
+	assert.NotContains(t, subFs.lastQuery, timeQuery)
+
+	assert.NoError(t, sync.CopyDir(fltCtx, subFs, tempFs1, false))
+	assert.Contains(t, subFs.lastQuery, timeQuery)
+
+	assert.NoError(t, sync.CopyDir(fltCtx, tempFs2, subFs, false))
+	assert.Contains(t, subFs.lastQuery, timeQuery)
+
+	assert.NoError(t, sync.CopyDir(defCtx, tempFs2, subFs, false))
+	assert.NotContains(t, subFs.lastQuery, timeQuery)
+
+	// validate list/walk
+	devNull, errOpen := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	require.NoError(t, errOpen)
+	defer func() {
+		_ = devNull.Close()
+	}()
+
+	assert.NoError(t, operations.List(defCtx, subFs, devNull))
+	assert.NotContains(t, subFs.lastQuery, timeQuery)
+
+	assert.NoError(t, operations.List(fltCtx, subFs, devNull))
+	assert.Contains(t, subFs.lastQuery, timeQuery)
+}
+
 func (f *Fs) InternalTest(t *testing.T) {
 	// These tests all depend on each other so run them as nested tests
 	t.Run("DocumentImport", func(t *testing.T) {
@@ -478,6 +600,8 @@ func (f *Fs) InternalTest(t *testing.T) {
 	t.Run("Shortcuts", f.InternalTestShortcuts)
 	t.Run("UnTrash", f.InternalTestUnTrash)
 	t.Run("CopyID", f.InternalTestCopyID)
+	t.Run("AgeQuery", f.InternalTestAgeQuery)
+	t.Run("ShouldRetry", f.InternalTestShouldRetry)
 }
 
 var _ fstests.InternalTester = (*Fs)(nil)

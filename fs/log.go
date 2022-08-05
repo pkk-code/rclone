@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -15,14 +15,14 @@ type LogLevel byte
 // Log levels.  These are the syslog levels of which we only use a
 // subset.
 //
-//    LOG_EMERG      system is unusable
-//    LOG_ALERT      action must be taken immediately
-//    LOG_CRIT       critical conditions
-//    LOG_ERR        error conditions
-//    LOG_WARNING    warning conditions
-//    LOG_NOTICE     normal, but significant, condition
-//    LOG_INFO       informational message
-//    LOG_DEBUG      debug-level message
+//	LOG_EMERG      system is unusable
+//	LOG_ALERT      action must be taken immediately
+//	LOG_CRIT       critical conditions
+//	LOG_ERR        error conditions
+//	LOG_WARNING    warning conditions
+//	LOG_NOTICE     normal, but significant, condition
+//	LOG_INFO       informational message
+//	LOG_DEBUG      debug-level message
 const (
 	LogLevelEmergency LogLevel = iota
 	LogLevelAlert
@@ -61,7 +61,7 @@ func (l *LogLevel) Set(s string) error {
 			return nil
 		}
 	}
-	return errors.Errorf("Unknown log level %q", s)
+	return fmt.Errorf("unknown log level %q", s)
 }
 
 // Type of the value
@@ -73,16 +73,22 @@ func (l *LogLevel) Type() string {
 func (l *LogLevel) UnmarshalJSON(in []byte) error {
 	return UnmarshalJSONFlag(in, l, func(i int64) error {
 		if i < 0 || i >= int64(LogLevel(len(logLevelToString))) {
-			return errors.Errorf("Unknown log level %d", i)
+			return fmt.Errorf("unknown log level %d", i)
 		}
 		*l = (LogLevel)(i)
 		return nil
 	})
 }
 
+// LogPrintPid enables process pid in log
+var LogPrintPid = false
+
 // LogPrint sends the text to the logger of level
 var LogPrint = func(level LogLevel, text string) {
 	text = fmt.Sprintf("%-6s: %s", level, text)
+	if LogPrintPid {
+		text = fmt.Sprintf("[%d] %s", os.Getpid(), text)
+	}
 	_ = log.Output(4, text)
 }
 

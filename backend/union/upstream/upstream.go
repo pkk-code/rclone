@@ -2,16 +2,16 @@ package upstream
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"math"
-	"path"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/pkg/errors"
+	"github.com/rclone/rclone/backend/union/common"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/cache"
 	"github.com/rclone/rclone/fs/fspath"
@@ -24,14 +24,18 @@ var (
 
 // Fs is a wrap of any fs and its configs
 type Fs struct {
+	// In order to ensure memory alignment on 32-bit architectures
+	// when this field is accessed through sync/atomic functions,
+	// it must be the first entry in the struct
+	cacheExpiry int64 // usage cache expiry time
 	fs.Fs
 	RootFs      fs.Fs
 	RootPath    string
+	Opt         *common.Options
 	writable    bool
 	creatable   bool
 	usage       *fs.Usage     // Cache the usage
 	cacheTime   time.Duration // cache duration
-	cacheExpiry int64         // usage cache expiry time
 	cacheMutex  sync.RWMutex
 	cacheOnce   sync.Once
 	cacheUpdate bool // if the cache is updating
@@ -62,17 +66,18 @@ type Entry interface {
 
 // New creates a new Fs based on the
 // string formatted `type:root_path(:ro/:nc)`
-func New(ctx context.Context, remote, root string, cacheTime time.Duration) (*Fs, error) {
+func New(ctx context.Context, remote, root string, opt *common.Options) (*Fs, error) {
 	configName, fsPath, err := fspath.SplitFs(remote)
 	if err != nil {
 		return nil, err
 	}
 	f := &Fs{
 		RootPath:    strings.TrimRight(root, "/"),
+		Opt:         opt,
 		writable:    true,
 		creatable:   true,
 		cacheExpiry: time.Now().Unix(),
-		cacheTime:   cacheTime,
+		cacheTime:   time.Duration(opt.CacheTime) * time.Second,
 		usage:       &fs.Usage{},
 	}
 	if strings.HasSuffix(fsPath, ":ro") {
@@ -90,7 +95,7 @@ func New(ctx context.Context, remote, root string, cacheTime time.Duration) (*Fs
 		return nil, err
 	}
 	f.RootFs = rFs
-	rootString := path.Join(remote, filepath.ToSlash(root))
+	rootString := fspath.JoinRootPath(remote, root)
 	myFs, err := cache.Get(ctx, rootString)
 	if err != nil && err != fs.ErrorIsFile {
 		return nil, err
@@ -127,13 +132,13 @@ func (f *Fs) WrapObject(o fs.Object) *Object {
 // WrapEntry wraps an fs.DirEntry to include the info
 // of the upstream Fs
 func (f *Fs) WrapEntry(e fs.DirEntry) (Entry, error) {
-	switch e.(type) {
+	switch e := e.(type) {
 	case fs.Object:
-		return f.WrapObject(e.(fs.Object)), nil
+		return f.WrapObject(e), nil
 	case fs.Directory:
-		return f.WrapDirectory(e.(fs.Directory)), nil
+		return f.WrapDirectory(e), nil
 	default:
-		return nil, errors.Errorf("unknown object type %T", e)
+		return nil, fmt.Errorf("unknown object type %T", e)
 	}
 }
 
@@ -243,6 +248,53 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	return nil
 }
 
+// GetTier returns storage tier or class of the Object
+func (o *Object) GetTier() string {
+	do, ok := o.Object.(fs.GetTierer)
+	if !ok {
+		return ""
+	}
+	return do.GetTier()
+}
+
+// ID returns the ID of the Object if known, or "" if not
+func (o *Object) ID() string {
+	do, ok := o.Object.(fs.IDer)
+	if !ok {
+		return ""
+	}
+	return do.ID()
+}
+
+// MimeType returns the content type of the Object if known
+func (o *Object) MimeType(ctx context.Context) (mimeType string) {
+	if do, ok := o.Object.(fs.MimeTyper); ok {
+		mimeType = do.MimeType(ctx)
+	}
+	return mimeType
+}
+
+// SetTier performs changing storage tier of the Object if
+// multiple storage classes supported
+func (o *Object) SetTier(tier string) error {
+	do, ok := o.Object.(fs.SetTierer)
+	if !ok {
+		return errors.New("underlying remote does not support SetTier")
+	}
+	return do.SetTier(tier)
+}
+
+// Metadata returns metadata for an object
+//
+// It should return nil if there is no Metadata
+func (o *Object) Metadata(ctx context.Context) (fs.Metadata, error) {
+	do, ok := o.Object.(fs.Metadataer)
+	if !ok {
+		return nil, nil
+	}
+	return do.Metadata(ctx)
+}
+
 // About gets quota information from the Fs
 func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
 	if atomic.LoadInt64(&f.cacheExpiry) <= time.Now().Unix() {
@@ -257,22 +309,26 @@ func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
 }
 
 // GetFreeSpace get the free space of the fs
+//
+// This is returned as 0..math.MaxInt64-1 leaving math.MaxInt64 as a sentinel
 func (f *Fs) GetFreeSpace() (int64, error) {
 	if atomic.LoadInt64(&f.cacheExpiry) <= time.Now().Unix() {
 		err := f.updateUsage()
 		if err != nil {
-			return math.MaxInt64, ErrUsageFieldNotSupported
+			return math.MaxInt64 - 1, ErrUsageFieldNotSupported
 		}
 	}
 	f.cacheMutex.RLock()
 	defer f.cacheMutex.RUnlock()
 	if f.usage.Free == nil {
-		return math.MaxInt64, ErrUsageFieldNotSupported
+		return math.MaxInt64 - 1, ErrUsageFieldNotSupported
 	}
 	return *f.usage.Free, nil
 }
 
 // GetUsedSpace get the used space of the fs
+//
+// This is returned as 0..math.MaxInt64-1 leaving math.MaxInt64 as a sentinel
 func (f *Fs) GetUsedSpace() (int64, error) {
 	if atomic.LoadInt64(&f.cacheExpiry) <= time.Now().Unix() {
 		err := f.updateUsage()
@@ -335,7 +391,7 @@ func (f *Fs) updateUsageCore(lock bool) error {
 	usage, err := f.RootFs.Features().About(ctx)
 	if err != nil {
 		f.cacheUpdate = false
-		if errors.Cause(err) == fs.ErrorDirNotFound {
+		if errors.Is(err, fs.ErrorDirNotFound) {
 			err = nil
 		}
 		return err
@@ -349,3 +405,8 @@ func (f *Fs) updateUsageCore(lock bool) error {
 	f.usage = usage
 	return nil
 }
+
+// Check the interfaces are satisfied
+var (
+	_ fs.FullObject = (*Object)(nil)
+)

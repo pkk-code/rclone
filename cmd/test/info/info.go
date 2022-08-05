@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/cmd"
 	"github.com/rclone/rclone/cmd/test"
 	"github.com/rclone/rclone/cmd/test/info/internal"
@@ -47,13 +46,13 @@ var (
 func init() {
 	test.Command.AddCommand(commandDefinition)
 	cmdFlags := commandDefinition.Flags()
-	flags.StringVarP(cmdFlags, &writeJSON, "write-json", "", "", "Write results to file.")
-	flags.BoolVarP(cmdFlags, &checkNormalization, "check-normalization", "", false, "Check UTF-8 Normalization.")
-	flags.BoolVarP(cmdFlags, &checkControl, "check-control", "", false, "Check control characters.")
-	flags.DurationVarP(cmdFlags, &uploadWait, "upload-wait", "", 0, "Wait after writing a file.")
-	flags.BoolVarP(cmdFlags, &checkLength, "check-length", "", false, "Check max filename length.")
-	flags.BoolVarP(cmdFlags, &checkStreaming, "check-streaming", "", false, "Check uploads with indeterminate file size.")
-	flags.BoolVarP(cmdFlags, &all, "all", "", false, "Run all tests.")
+	flags.StringVarP(cmdFlags, &writeJSON, "write-json", "", "", "Write results to file")
+	flags.BoolVarP(cmdFlags, &checkNormalization, "check-normalization", "", false, "Check UTF-8 Normalization")
+	flags.BoolVarP(cmdFlags, &checkControl, "check-control", "", false, "Check control characters")
+	flags.DurationVarP(cmdFlags, &uploadWait, "upload-wait", "", 0, "Wait after writing a file")
+	flags.BoolVarP(cmdFlags, &checkLength, "check-length", "", false, "Check max filename length")
+	flags.BoolVarP(cmdFlags, &checkStreaming, "check-streaming", "", false, "Check uploads with indeterminate file size")
+	flags.BoolVarP(cmdFlags, &all, "all", "", false, "Run all tests")
 }
 
 var commandDefinition = &cobra.Command{
@@ -92,7 +91,7 @@ type results struct {
 	mu                   sync.Mutex
 	stringNeedsEscaping  map[string]internal.Position
 	controlResults       map[string]internal.ControlResult
-	maxFileLength        int
+	maxFileLength        [4]int
 	canWriteUnnormalized bool
 	canReadUnnormalized  bool
 	canReadRenormalized  bool
@@ -126,7 +125,9 @@ func (r *results) Print() {
 		fmt.Printf("}\n")
 	}
 	if checkLength {
-		fmt.Printf("maxFileLength = %d\n", r.maxFileLength)
+		for i := range r.maxFileLength {
+			fmt.Printf("maxFileLength = %d // for %d byte unicode characters\n", r.maxFileLength[i], i+1)
+		}
 	}
 	if checkNormalization {
 		fmt.Printf("canWriteUnnormalized = %v\n", r.canWriteUnnormalized)
@@ -151,7 +152,7 @@ func (r *results) WriteJSON() {
 		report.ControlCharacters = &r.controlResults
 	}
 	if checkLength {
-		report.MaxFileLength = &r.maxFileLength
+		report.MaxFileLength = &r.maxFileLength[0]
 	}
 	if checkNormalization {
 		report.CanWriteUnnormalized = &r.canWriteUnnormalized
@@ -367,11 +368,27 @@ func (r *results) checkControlsList() {
 }
 
 // find the max file name size we can use
-func (r *results) findMaxLength() {
+func (r *results) findMaxLength(characterLength int) {
+	var character rune
+	switch characterLength {
+	case 1:
+		character = 'a'
+	case 2:
+		character = 'á'
+	case 3:
+		character = '世'
+	case 4:
+		character = '🙂'
+	default:
+		panic("Bad characterLength")
+	}
+	if characterLength != len(string(character)) {
+		panic(fmt.Sprintf("Chose the wrong character length %q is %d not %d", character, len(string(character)), characterLength))
+	}
 	const maxLen = 16 * 1024
-	name := make([]byte, maxLen)
+	name := make([]rune, maxLen)
 	for i := range name {
-		name[i] = 'a'
+		name[i] = character
 	}
 	// Find the first size of filename we can't write
 	i := sort.Search(len(name), func(i int) (fail bool) {
@@ -383,16 +400,20 @@ func (r *results) findMaxLength() {
 		}()
 
 		path := string(name[:i])
-		_, err := r.writeFile(path)
+		o, err := r.writeFile(path)
 		if err != nil {
 			fs.Infof(r.f, "Couldn't write file with name length %d: %v", i, err)
 			return true
 		}
 		fs.Infof(r.f, "Wrote file with name length %d", i)
+		err = o.Remove(context.Background())
+		if err != nil {
+			fs.Errorf(o, "Failed to remove test file")
+		}
 		return false
 	})
-	r.maxFileLength = i - 1
-	fs.Infof(r.f, "Max file length is %d", r.maxFileLength)
+	r.maxFileLength[characterLength-1] = i - 1
+	fs.Infof(r.f, "Max file length is %d when writing %d byte characters %q", r.maxFileLength[characterLength-1], characterLength, character)
 }
 
 func (r *results) checkStreaming() {
@@ -441,14 +462,16 @@ func (r *results) checkStreaming() {
 func readInfo(ctx context.Context, f fs.Fs) error {
 	err := f.Mkdir(ctx, "")
 	if err != nil {
-		return errors.Wrap(err, "couldn't mkdir")
+		return fmt.Errorf("couldn't mkdir: %w", err)
 	}
 	r := newResults(ctx, f)
 	if checkControl {
 		r.checkControls()
 	}
 	if checkLength {
-		r.findMaxLength()
+		for i := range r.maxFileLength {
+			r.findMaxLength(i + 1)
+		}
 	}
 	if checkNormalization {
 		r.checkUTF8Normalization()

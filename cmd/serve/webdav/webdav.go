@@ -3,6 +3,8 @@ package webdav
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -16,7 +18,6 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/flags"
 	"github.com/rclone/rclone/fs/hash"
-	"github.com/rclone/rclone/lib/errors"
 	"github.com/rclone/rclone/lib/http/serve"
 	"github.com/rclone/rclone/vfs"
 	"github.com/rclone/rclone/vfs/vfsflags"
@@ -42,14 +43,12 @@ func init() {
 // Command definition for cobra
 var Command = &cobra.Command{
 	Use:   "webdav remote:path",
-	Short: `Serve remote:path over webdav.`,
-	Long: `
-rclone serve webdav implements a basic webdav server to serve the
-remote over HTTP via the webdav protocol. This can be viewed with a
-webdav client, through a web browser, or you can make a remote of
-type webdav to read and write it.
+	Short: `Serve remote:path over WebDAV.`,
+	Long: `Run a basic WebDAV server to serve a remote over HTTP via the
+WebDAV protocol. This can be viewed with a WebDAV client, through a web
+browser, or you can make a remote of type WebDAV to read and write it.
 
-### Webdav options
+### WebDAV options
 
 #### --etag-hash 
 
@@ -58,9 +57,8 @@ based on the ModTime and Size of the object.
 
 If this flag is set to "auto" then rclone will choose the first
 supported hash on the backend or you can use a named hash such as
-"MD5" or "SHA-1".
-
-Use "rclone hashsum" to see the full list.
+"MD5" or "SHA-1". Use the [hashsum](/commands/rclone_hashsum/) command
+to see the full list.
 
 ` + httplib.Help + vfs.Help + proxy.Help,
 	RunE: func(command *cobra.Command, args []string) error {
@@ -157,7 +155,7 @@ func (w *WebDAV) getVFS(ctx context.Context) (VFS *vfs.VFS, err error) {
 	}
 	VFS, ok := value.(*vfs.VFS)
 	if !ok {
-		return nil, errors.Errorf("context value is not VFS: %#v", value)
+		return nil, fmt.Errorf("context value is not VFS: %#v", value)
 	}
 	return VFS, nil
 }

@@ -18,7 +18,6 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/config/flags"
-	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/fs/walk"
 	"github.com/rclone/rclone/lib/http/serve"
@@ -37,27 +36,27 @@ var (
 func init() {
 	httpflags.AddFlags(Command.Flags())
 	flagSet := Command.Flags()
-	flags.BoolVarP(flagSet, &stdio, "stdio", "", false, "run an HTTP2 server on stdin/stdout")
-	flags.BoolVarP(flagSet, &appendOnly, "append-only", "", false, "disallow deletion of repository data")
-	flags.BoolVarP(flagSet, &privateRepos, "private-repos", "", false, "users can only access their private repo")
-	flags.BoolVarP(flagSet, &cacheObjects, "cache-objects", "", true, "cache listed objects")
+	flags.BoolVarP(flagSet, &stdio, "stdio", "", false, "Run an HTTP2 server on stdin/stdout")
+	flags.BoolVarP(flagSet, &appendOnly, "append-only", "", false, "Disallow deletion of repository data")
+	flags.BoolVarP(flagSet, &privateRepos, "private-repos", "", false, "Users can only access their private repo")
+	flags.BoolVarP(flagSet, &cacheObjects, "cache-objects", "", true, "Cache listed objects")
 }
 
 // Command definition for cobra
 var Command = &cobra.Command{
 	Use:   "restic remote:path",
 	Short: `Serve the remote for restic's REST API.`,
-	Long: `rclone serve restic implements restic's REST backend API
-over HTTP.  This allows restic to use rclone as a data storage
+	Long: `Run a basic web server to serve a remove over restic's REST backend
+API over HTTP.  This allows restic to use rclone as a data storage
 mechanism for cloud providers that restic does not support directly.
 
-[Restic](https://restic.net/) is a command line program for doing
+[Restic](https://restic.net/) is a command-line program for doing
 backups.
 
 The server will log errors.  Use -v to see access logs.
 
---bwlimit will be respected for file transfers.  Use --stats to
-control the stats printing.
+` + "`--bwlimit`" + ` will be respected for file transfers.
+Use ` + "`--stats`" + ` to control the stats printing.
 
 ### Setting up rclone for use by restic ###
 
@@ -76,11 +75,11 @@ Where you can replace "backup" in the above by whatever path in the
 remote you wish to use.
 
 By default this will serve on "localhost:8080" you can change this
-with use of the "--addr" flag.
+with use of the ` + "`--addr`" + ` flag.
 
 You might wish to start this server on boot.
 
-Adding --cache-objects=false will cause rclone to stop caching objects
+Adding ` + "`--cache-objects=false`" + ` will cause rclone to stop caching objects
 returned from the List call. Caching is normally desirable as it speeds
 up downloading objects, saves transactions and uses very little memory.
 
@@ -126,7 +125,7 @@ these **must** end with /.  Eg
 
 #### Private repositories ####
 
-The "--private-repos" flag can be used to limit users to repositories starting
+The` + "`--private-repos`" + ` flag can be used to limit users to repositories starting
 with a path of ` + "`/<username>/`" + `.
 ` + httplib.Help,
 	Run: func(command *cobra.Command, args []string) {
@@ -136,7 +135,7 @@ with a path of ` + "`/<username>/`" + `.
 			s := NewServer(f, &httpflags.Opt)
 			if stdio {
 				if terminal.IsTerminal(int(os.Stdout.Fd())) {
-					return errors.New("Refusing to run HTTP2 server directly on a terminal, please let restic start rclone")
+					return errors.New("refusing to run HTTP2 server directly on a terminal, please let restic start rclone")
 				}
 
 				conn := &StdioConn{
@@ -386,8 +385,7 @@ func (s *Server) listObjects(w http.ResponseWriter, r *http.Request, remote stri
 		return nil
 	})
 	if err != nil {
-		_, err = fserrors.Cause(err)
-		if err != fs.ErrorDirNotFound {
+		if !errors.Is(err, fs.ErrorDirNotFound) {
 			fs.Errorf(remote, "list failed: %#v %T", err, err)
 			http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 			return

@@ -24,6 +24,8 @@ const (
 var MaxCompletedTransfers = 100
 
 // StatsInfo accounts all transfers
+// N.B.: if this struct is modified, please remember to also update sum() function in stats_groups
+// to correctly count the updated fields
 type StatsInfo struct {
 	mu                sync.RWMutex
 	ctx               context.Context
@@ -390,9 +392,9 @@ func (s *StatsInfo) String() string {
 		}
 	}
 
-	_, _ = fmt.Fprintf(buf, "%s%11s / %s, %s, %s, ETA %s%s",
+	_, _ = fmt.Fprintf(buf, "%s%13s / %s, %s, %s, ETA %s%s",
 		dateString,
-		fs.SizeSuffix(s.bytes),
+		fs.SizeSuffix(s.bytes).ByteUnit(),
 		fs.SizeSuffix(ts.totalBytes).ByteUnit(),
 		percent(s.bytes, ts.totalBytes),
 		displaySpeedString,
@@ -712,10 +714,10 @@ func (s *StatsInfo) NewTransferRemoteSize(remote string, size int64) *Transfer {
 
 // DoneTransferring removes a transfer from the stats
 //
-// if ok is true then it increments the transfers count
+// if ok is true and it was in the transfermap (to avoid incrementing in case of nested calls, #6213) then it increments the transfers count
 func (s *StatsInfo) DoneTransferring(remote string, ok bool) {
-	s.transferring.del(remote)
-	if ok {
+	existed := s.transferring.del(remote)
+	if ok && existed {
 		s.mu.Lock()
 		s.transfers++
 		s.mu.Unlock()

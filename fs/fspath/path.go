@@ -13,12 +13,12 @@ import (
 )
 
 const (
-	configNameRe = `[\w_ -]+`
+	configNameRe = `[\w_. -]+`
 	remoteNameRe = `^(:?` + configNameRe + `)`
 )
 
 var (
-	errInvalidCharacters = errors.New("config name contains invalid characters - may only contain `0-9`, `A-Z`, `a-z`, `_`, `-` and space")
+	errInvalidCharacters = errors.New("config name contains invalid characters - may only contain `0-9`, `A-Z`, `a-z`, `_`, `-`, `.` and space")
 	errCantBeEmpty       = errors.New("can't use empty string as a path")
 	errCantStartWithDash = errors.New("config name starts with `-`")
 	errBadConfigParam    = errors.New("config parameters may only contain `0-9`, `A-Z`, `a-z` and `_`")
@@ -99,7 +99,7 @@ func Parse(path string) (parsed Parsed, err error) {
 		return parsed, errCantBeEmpty
 	}
 	// If path has no `:` in, it must be a local path
-	if strings.IndexRune(path, ':') < 0 {
+	if !strings.ContainsRune(path, ':') {
 		return parsed, nil
 	}
 	// States for parser
@@ -208,7 +208,7 @@ loop:
 				value := path[prev : i-1]
 				// replace any doubled quotes if there were any
 				if doubled {
-					value = strings.Replace(value, string(quote)+string(quote), string(quote), -1)
+					value = strings.ReplaceAll(value, string(quote)+string(quote), string(quote))
 				}
 				prev = i + 1
 				parsed.Config[param] = value

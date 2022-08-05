@@ -3,15 +3,17 @@ package configfile
 
 import (
 	"bytes"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/Unknwon/goconfig"
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
+	"github.com/rclone/rclone/lib/file"
 )
 
 // Install installs the config file handler
@@ -104,28 +106,28 @@ func (s *Storage) Save() error {
 
 	configPath := config.GetConfigPath()
 	if configPath == "" {
-		return errors.Errorf("Failed to save config file: Path is empty")
+		return fmt.Errorf("failed to save config file, path is empty")
 	}
 
 	dir, name := filepath.Split(configPath)
-	err := os.MkdirAll(dir, os.ModePerm)
+	err := file.MkdirAll(dir, os.ModePerm)
 	if err != nil {
-		return errors.Wrap(err, "failed to create config directory")
+		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 	f, err := ioutil.TempFile(dir, name)
 	if err != nil {
-		return errors.Errorf("Failed to create temp file for new config: %v", err)
+		return fmt.Errorf("failed to create temp file for new config: %w", err)
 	}
 	defer func() {
 		_ = f.Close()
 		if err := os.Remove(f.Name()); err != nil && !os.IsNotExist(err) {
-			fs.Errorf(nil, "Failed to remove temp config file: %v", err)
+			fs.Errorf(nil, "failed to remove temp config file: %v", err)
 		}
 	}()
 
 	var buf bytes.Buffer
 	if err := goconfig.SaveConfigData(s.gc, &buf); err != nil {
-		return errors.Errorf("Failed to save config file: %v", err)
+		return fmt.Errorf("failed to save config file: %w", err)
 	}
 
 	if err := config.Encrypt(&buf, f); err != nil {
@@ -135,7 +137,7 @@ func (s *Storage) Save() error {
 	_ = f.Sync()
 	err = f.Close()
 	if err != nil {
-		return errors.Errorf("Failed to close config file: %v", err)
+		return fmt.Errorf("failed to close config file: %w", err)
 	}
 
 	var fileMode os.FileMode = 0600
@@ -155,10 +157,10 @@ func (s *Storage) Save() error {
 	}
 
 	if err = os.Rename(configPath, configPath+".old"); err != nil && !os.IsNotExist(err) {
-		return errors.Errorf("Failed to move previous config to backup location: %v", err)
+		return fmt.Errorf("failed to move previous config to backup location: %w", err)
 	}
 	if err = os.Rename(f.Name(), configPath); err != nil {
-		return errors.Errorf("Failed to move newly written config from %s to final location: %v", f.Name(), err)
+		return fmt.Errorf("failed to move newly written config from %s to final location: %v", f.Name(), err)
 	}
 	if err := os.Remove(configPath + ".old"); err != nil && !os.IsNotExist(err) {
 		fs.Errorf(nil, "Failed to remove backup config file: %v", err)
@@ -175,7 +177,7 @@ func (s *Storage) Serialize() (string, error) {
 	s.check()
 	var buf bytes.Buffer
 	if err := goconfig.SaveConfigData(s.gc, &buf); err != nil {
-		return "", errors.Errorf("Failed to save config file: %v", err)
+		return "", fmt.Errorf("failed to save config file: %w", err)
 	}
 
 	return buf.String(), nil
@@ -185,10 +187,7 @@ func (s *Storage) Serialize() (string, error) {
 func (s *Storage) HasSection(section string) bool {
 	s.check()
 	_, err := s.gc.GetSection(section)
-	if err != nil {
-		return false
-	}
-	return true
+	return err == nil
 }
 
 // DeleteSection removes the named section and all config from the
@@ -224,6 +223,10 @@ func (s *Storage) GetValue(section string, key string) (value string, found bool
 // SetValue sets the value under key in section
 func (s *Storage) SetValue(section string, key string, value string) {
 	s.check()
+	if strings.HasPrefix(section, ":") {
+		fs.Logf(nil, "Can't save config %q for on the fly backend %q", key, section)
+		return
+	}
 	s.gc.SetValue(section, key, value)
 }
 

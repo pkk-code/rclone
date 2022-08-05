@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -15,7 +16,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs/config/flags"
 	"github.com/spf13/pflag"
 )
@@ -25,39 +25,39 @@ import (
 var Help = `
 ### Server options
 
-Use --addr to specify which IP address and port the server should
-listen on, eg --addr 1.2.3.4:8000 or --addr :8080 to listen to all
+Use ` + "`--addr`" + ` to specify which IP address and port the server should
+listen on, eg ` + "`--addr 1.2.3.4:8000` or `--addr :8080`" + ` to listen to all
 IPs.  By default it only listens on localhost.  You can use port
 :0 to let the OS choose an available port.
 
-If you set --addr to listen on a public or LAN accessible IP address
+If you set ` + "`--addr`" + ` to listen on a public or LAN accessible IP address
 then using Authentication is advised - see the next section for info.
 
---server-read-timeout and --server-write-timeout can be used to
+` + "`--server-read-timeout` and `--server-write-timeout`" + ` can be used to
 control the timeouts on the server.  Note that this is the total time
 for a transfer.
 
---max-header-bytes controls the maximum number of bytes the server will
+` + "`--max-header-bytes`" + ` controls the maximum number of bytes the server will
 accept in the HTTP header.
 
---baseurl controls the URL prefix that rclone serves from.  By default
-rclone will serve from the root.  If you used --baseurl "/rclone" then
+` + "`--baseurl`" + ` controls the URL prefix that rclone serves from.  By default
+rclone will serve from the root.  If you used ` + "`--baseurl \"/rclone\"`" + ` then
 rclone would serve from a URL starting with "/rclone/".  This is
 useful if you wish to proxy rclone serve.  Rclone automatically
-inserts leading and trailing "/" on --baseurl, so --baseurl "rclone",
---baseurl "/rclone" and --baseurl "/rclone/" are all treated
+inserts leading and trailing "/" on ` + "`--baseurl`" + `, so ` + "`--baseurl \"rclone\"`" + `,
+` + "`--baseurl \"/rclone\"` and `--baseurl \"/rclone/\"`" + ` are all treated
 identically.
 
 #### SSL/TLS
 
 By default this will serve over http.  If you want you can serve over
-https.  You will need to supply the --cert and --key flags.  If you
-wish to do client side certificate validation then you will need to
-supply --client-ca also.
+https.  You will need to supply the ` + "`--cert` and `--key`" + ` flags.
+If you wish to do client side certificate validation then you will need to
+supply ` + "`--client-ca`" + ` also.
 
---cert should be a either a PEM encoded certificate or a concatenation
-of that with the CA certificate.  --key should be the PEM encoded
-private key and --client-ca should be the PEM encoded client
+` + "`--cert`" + ` should be a either a PEM encoded certificate or a concatenation
+of that with the CA certificate.  ` + "`--key`" + ` should be the PEM encoded
+private key and ` + "`--client-ca`" + ` should be the PEM encoded client
 certificate authority certificate.
 `
 
@@ -71,8 +71,10 @@ type Options struct {
 	ServerReadTimeout  time.Duration // Timeout for server reading data
 	ServerWriteTimeout time.Duration // Timeout for server writing data
 	MaxHeaderBytes     int           // Maximum size of request header
-	SslCert            string        // SSL PEM key (concatenation of certificate and CA certificate)
-	SslKey             string        // SSL PEM Private key
+	SslCert            string        // Path to SSL PEM key (concatenation of certificate and CA certificate)
+	SslKey             string        // Path to SSL PEM Private key
+	SslCertBody        []byte        // SSL PEM key (concatenation of certificate and CA certificate) body, ignores SslCert
+	SslKeyBody         []byte        // SSL PEM Private key body, ignores SslKey
 	ClientCA           string        // Client certificate authority to verify clients with
 }
 
@@ -110,7 +112,7 @@ var (
 )
 
 func useSSL(opt Options) bool {
-	return opt.SslKey != ""
+	return opt.SslKey != "" || len(opt.SslKeyBody) > 0
 }
 
 // NewServer instantiates a new http server using provided listeners and options
@@ -120,30 +122,46 @@ func useSSL(opt Options) bool {
 func NewServer(listeners, tlsListeners []net.Listener, opt Options) (Server, error) {
 	// Validate input
 	if len(listeners) == 0 && len(tlsListeners) == 0 {
-		return nil, errors.New("Can't create server without listeners")
+		return nil, errors.New("can't create server without listeners")
 	}
 
 	// Prepare TLS config
-	var tlsConfig *tls.Config = nil
+	var tlsConfig *tls.Config
 
 	useSSL := useSSL(opt)
-	if (opt.SslCert != "") != useSSL {
-		err := errors.New("Need both -cert and -key to use SSL")
+	if (len(opt.SslCertBody) > 0) != (len(opt.SslKeyBody) > 0) {
+		err := errors.New("need both SslCertBody and SslKeyBody to use SSL")
+		log.Fatalf(err.Error())
+		return nil, err
+	}
+	if (opt.SslCert != "") != (opt.SslKey != "") {
+		err := errors.New("need both -cert and -key to use SSL")
 		log.Fatalf(err.Error())
 		return nil, err
 	}
 
 	if useSSL {
+		var cert tls.Certificate
+		var err error
+		if len(opt.SslCertBody) > 0 {
+			cert, err = tls.X509KeyPair(opt.SslCertBody, opt.SslKeyBody)
+		} else {
+			cert, err = tls.LoadX509KeyPair(opt.SslCert, opt.SslKey)
+		}
+		if err != nil {
+			log.Fatal(err)
+		}
 		tlsConfig = &tls.Config{
-			MinVersion: tls.VersionTLS10, // disable SSL v3.0 and earlier
+			MinVersion:   tls.VersionTLS10, // disable SSL v3.0 and earlier
+			Certificates: []tls.Certificate{cert},
 		}
 	} else if len(listeners) == 0 && len(tlsListeners) != 0 {
-		return nil, errors.New("No SslKey or non-tlsListeners")
+		return nil, errors.New("no SslKey or non-tlsListeners")
 	}
 
 	if opt.ClientCA != "" {
 		if !useSSL {
-			err := errors.New("Can't use --client-ca without --cert and --key")
+			err := errors.New("can't use --client-ca without --cert and --key")
 			log.Fatalf(err.Error())
 			return nil, err
 		}
@@ -154,7 +172,7 @@ func NewServer(listeners, tlsListeners []net.Listener, opt Options) (Server, err
 			return nil, err
 		}
 		if !certpool.AppendCertsFromPEM(pem) {
-			err := errors.New("Can't parse client certificate authority")
+			err := errors.New("can't parse client certificate authority")
 			log.Fatalf(err.Error())
 			return nil, err
 		}
@@ -211,24 +229,35 @@ func NewServer(listeners, tlsListeners []net.Listener, opt Options) (Server, err
 }
 
 func (s *server) Serve() {
-	serve := func(l net.Listener) {
+	serve := func(l net.Listener, tls bool) {
 		defer s.closing.Done()
-		if err := s.httpServer.Serve(l); err != http.ErrServerClosed && err != nil {
+		var err error
+		if tls {
+			err = s.httpServer.ServeTLS(l, "", "")
+		} else {
+			err = s.httpServer.Serve(l)
+		}
+		if err != http.ErrServerClosed && err != nil {
 			log.Fatalf(err.Error())
 		}
 	}
 
 	s.closing.Add(len(s.listeners))
 	for _, l := range s.listeners {
-		go serve(l)
+		go serve(l, false)
 	}
 
 	if s.useSSL {
 		s.closing.Add(len(s.tlsListeners))
 		for _, l := range s.tlsListeners {
-			go serve(l)
+			go serve(l, true)
 		}
 	}
+}
+
+// Wait blocks while the server is serving requests
+func (s *server) Wait() {
+	s.closing.Wait()
 }
 
 // Router returns the server base router
@@ -289,6 +318,11 @@ func Restart() error {
 	}
 
 	return start()
+}
+
+// Wait blocks while the default http server is serving requests
+func Wait() {
+	defaultServer.Wait()
 }
 
 // Start the default server
@@ -368,14 +402,14 @@ func URL() string {
 
 // AddFlagsPrefix adds flags for the httplib
 func AddFlagsPrefix(flagSet *pflag.FlagSet, prefix string, Opt *Options) {
-	flags.StringVarP(flagSet, &Opt.ListenAddr, prefix+"addr", "", Opt.ListenAddr, "IPaddress:Port or :Port to bind server to.")
+	flags.StringVarP(flagSet, &Opt.ListenAddr, prefix+"addr", "", Opt.ListenAddr, "IPaddress:Port or :Port to bind server to")
 	flags.DurationVarP(flagSet, &Opt.ServerReadTimeout, prefix+"server-read-timeout", "", Opt.ServerReadTimeout, "Timeout for server reading data")
 	flags.DurationVarP(flagSet, &Opt.ServerWriteTimeout, prefix+"server-write-timeout", "", Opt.ServerWriteTimeout, "Timeout for server writing data")
 	flags.IntVarP(flagSet, &Opt.MaxHeaderBytes, prefix+"max-header-bytes", "", Opt.MaxHeaderBytes, "Maximum size of request header")
 	flags.StringVarP(flagSet, &Opt.SslCert, prefix+"cert", "", Opt.SslCert, "SSL PEM key (concatenation of certificate and CA certificate)")
 	flags.StringVarP(flagSet, &Opt.SslKey, prefix+"key", "", Opt.SslKey, "SSL PEM Private key")
 	flags.StringVarP(flagSet, &Opt.ClientCA, prefix+"client-ca", "", Opt.ClientCA, "Client certificate authority to verify clients with")
-	flags.StringVarP(flagSet, &Opt.BaseURL, prefix+"baseurl", "", Opt.BaseURL, "Prefix for URLs - leave blank for root.")
+	flags.StringVarP(flagSet, &Opt.BaseURL, prefix+"baseurl", "", Opt.BaseURL, "Prefix for URLs - leave blank for root")
 
 }
 

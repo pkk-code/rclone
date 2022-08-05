@@ -5,6 +5,7 @@ package config
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -13,7 +14,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/configstruct"
@@ -61,15 +61,19 @@ func CommandDefault(commands []string, defaultIndex int) byte {
 	for {
 		fmt.Printf("%s> ", optHelp)
 		result := strings.ToLower(ReadLine())
-		if len(result) == 0 && defaultIndex >= 0 {
-			return optString[defaultIndex]
-		}
-		if len(result) != 1 {
-			continue
-		}
-		i := strings.Index(optString, string(result[0]))
-		if i >= 0 {
-			return result[0]
+		if len(result) == 0 {
+			if defaultIndex >= 0 {
+				return optString[defaultIndex]
+			}
+			fmt.Printf("This value is required and it has no default.\n")
+		} else if len(result) == 1 {
+			i := strings.Index(optString, string(result[0]))
+			if i >= 0 {
+				return result[0]
+			}
+			fmt.Printf("This value must be one of the following characters: %s.\n", strings.Join(opts, ", "))
+		} else {
+			fmt.Printf("This value must be a single character, one of the following: %s.\n", strings.Join(opts, ", "))
 		}
 	}
 }
@@ -90,24 +94,31 @@ func Confirm(Default bool) bool {
 	return CommandDefault([]string{"yYes", "nNo"}, defaultIndex) == 'y'
 }
 
-// Choose one of the defaults or type a new string if newOk is set
-func Choose(what string, defaults, help []string, newOk bool) string {
+// Choose one of the choices, or default, or type a new string if newOk is set
+func Choose(what string, kind string, choices, help []string, defaultValue string, required bool, newOk bool) string {
 	valueDescription := "an existing"
 	if newOk {
 		valueDescription = "your own"
 	}
-	fmt.Printf("Choose a number from below, or type in %s value\n", valueDescription)
+	fmt.Printf("Choose a number from below, or type in %s %s.\n", valueDescription, kind)
+	// Empty input is allowed if not required is set, or if
+	// required is set but there is a default value to use.
+	if defaultValue != "" {
+		fmt.Printf("Press Enter for the default (%s).\n", defaultValue)
+	} else if !required {
+		fmt.Printf("Press Enter to leave empty.\n")
+	}
 	attributes := []string{terminal.HiRedFg, terminal.HiGreenFg}
-	for i, text := range defaults {
+	for i, text := range choices {
 		var lines []string
-		if help != nil {
+		if help != nil && help[i] != "" {
 			parts := strings.Split(help[i], "\n")
 			lines = append(lines, parts...)
+			lines = append(lines, fmt.Sprintf("(%s)", text))
 		}
-		lines = append(lines, fmt.Sprintf("%q", text))
 		pos := i + 1
 		terminal.WriteString(attributes[i%len(attributes)])
-		if len(lines) == 1 {
+		if len(lines) == 0 {
 			fmt.Printf("%2d > %s\n", pos, text)
 		} else {
 			mid := (len(lines) - 1) / 2
@@ -135,20 +146,106 @@ func Choose(what string, defaults, help []string, newOk bool) string {
 		result := ReadLine()
 		i, err := strconv.Atoi(result)
 		if err != nil {
-			if newOk {
-				return result
-			}
-			for _, v := range defaults {
+			for _, v := range choices {
 				if result == v {
 					return result
 				}
 			}
-			continue
-		}
-		if i >= 1 && i <= len(defaults) {
-			return defaults[i-1]
+			if result == "" {
+				// If empty string is in the predefined list of choices it has already been returned above.
+				// If parameter required is not set, then empty string is always a valid value.
+				if !required {
+					return result
+				}
+				// If parameter required is set, but there is a default, then empty input means default.
+				if defaultValue != "" {
+					return defaultValue
+				}
+				// If parameter required is set, and there is no default, then an input value is required.
+				fmt.Printf("This value is required and it has no default.\n")
+			} else if newOk {
+				// If legal input is not restricted to defined choices, then any nonzero input string is accepted.
+				return result
+			} else {
+				// A nonzero input string was specified but it did not match any of the strictly defined choices.
+				fmt.Printf("This value must match %s value.\n", valueDescription)
+			}
+		} else {
+			if i >= 1 && i <= len(choices) {
+				return choices[i-1]
+			}
+			fmt.Printf("No choices with this number.\n")
 		}
 	}
+}
+
+// Enter prompts for an input value of a specified type
+func Enter(what string, kind string, defaultValue string, required bool) string {
+	// Empty input is allowed if not required is set, or if
+	// required is set but there is a default value to use.
+	fmt.Printf("Enter a %s.", kind)
+	if defaultValue != "" {
+		fmt.Printf(" Press Enter for the default (%s).\n", defaultValue)
+	} else if !required {
+		fmt.Println(" Press Enter to leave empty.")
+	} else {
+		fmt.Println()
+	}
+	for {
+		fmt.Printf("%s> ", what)
+		result := ReadLine()
+		if !required || result != "" {
+			return result
+		}
+		if defaultValue != "" {
+			return defaultValue
+		}
+		fmt.Printf("This value is required and it has no default.\n")
+	}
+}
+
+// ChoosePassword asks the user for a password
+func ChoosePassword(defaultValue string, required bool) string {
+	fmt.Printf("Choose an alternative below.")
+	actions := []string{"yYes, type in my own password", "gGenerate random password"}
+	defaultAction := -1
+	if defaultValue != "" {
+		defaultAction = len(actions)
+		actions = append(actions, "nNo, keep existing")
+		fmt.Printf(" Press Enter for the default (%s).", string(actions[defaultAction][0]))
+	} else if !required {
+		defaultAction = len(actions)
+		actions = append(actions, "nNo, leave this optional password blank")
+		fmt.Printf(" Press Enter for the default (%s).", string(actions[defaultAction][0]))
+	}
+	fmt.Println()
+	var password string
+	var err error
+	switch i := CommandDefault(actions, defaultAction); i {
+	case 'y':
+		password = ChangePassword("the")
+	case 'g':
+		for {
+			fmt.Printf("Password strength in bits.\n64 is just about memorable\n128 is secure\n1024 is the maximum\n")
+			bits := ChooseNumber("Bits", 64, 1024)
+			password, err = Password(bits)
+			if err != nil {
+				log.Fatalf("Failed to make password: %v", err)
+			}
+			fmt.Printf("Your password is: %s\n", password)
+			fmt.Printf("Use this password? Please note that an obscured version of this \npassword (and not the " +
+				"password itself) will be stored under your \nconfiguration file, so keep this generated password " +
+				"in a safe place.\n")
+			if Confirm(true) {
+				break
+			}
+		}
+	case 'n':
+		return defaultValue
+	default:
+		fs.Errorf(nil, "Bad choice %c", i)
+	}
+	return obscure.MustObscure(password)
 }
 
 // ChooseNumber asks the user to enter a number between min and max
@@ -188,7 +285,8 @@ func ShowRemotes() {
 func ChooseRemote() string {
 	remotes := LoadedData().GetSectionList()
 	sort.Strings(remotes)
-	return Choose("remote", remotes, nil, false)
+	fmt.Println("Select remote.")
+	return Choose("remote", "value", remotes, nil, "", true, false)
 }
 
 // mustFindByName finds the RegInfo for the remote name passed in or
@@ -201,10 +299,8 @@ func mustFindByName(name string) *fs.RegInfo {
 	return fs.MustFind(fsType)
 }
 
-// ShowRemote shows the contents of the remote
-func ShowRemote(name string) {
-	fmt.Printf("--------------------\n")
-	fmt.Printf("[%s]\n", name)
+// printRemoteOptions prints the options of the remote
+func printRemoteOptions(name string, prefix string, sep string) {
 	fs := mustFindByName(name)
 	for _, key := range LoadedData().GetKeyList(name) {
 		isPassword := false
@@ -216,17 +312,30 @@ func ShowRemote(name string) {
 		}
 		value := FileGet(name, key)
 		if isPassword && value != "" {
-			fmt.Printf("%s = *** ENCRYPTED ***\n", key)
+			fmt.Printf("%s%s%s*** ENCRYPTED ***\n", prefix, key, sep)
 		} else {
-			fmt.Printf("%s = %s\n", key, value)
+			fmt.Printf("%s%s%s%s\n", prefix, key, sep, value)
 		}
 	}
-	fmt.Printf("--------------------\n")
+}
+
+// listRemoteOptions lists the options of the remote
+func listRemoteOptions(name string) {
+	printRemoteOptions(name, "- ", ": ")
+}
+
+// ShowRemote shows the contents of the remote in config file format
+func ShowRemote(name string) {
+	fmt.Printf("[%s]\n", name)
+	printRemoteOptions(name, "", " = ")
 }
 
 // OkRemote prints the contents of the remote and ask if it is OK
 func OkRemote(name string) bool {
-	ShowRemote(name)
+	fmt.Println("Configuration complete.")
+	fmt.Println("Options:")
+	listRemoteOptions(name)
+	fmt.Printf("Keep this %q remote?\n", name)
 	switch i := CommandDefault([]string{"yYes this is OK", "eEdit this remote", "dDelete this remote"}, 0); i {
 	case 'y':
 		return true
@@ -239,6 +348,11 @@ func OkRemote(name string) bool {
 		fs.Errorf(nil, "Bad choice %c", i)
 	}
 	return false
+}
+
+// newSection prints an empty line to separate sections
+func newSection() {
+	fmt.Println()
 }
 
 // backendConfig configures the backend starting from the state passed in
@@ -277,11 +391,11 @@ func backendConfig(ctx context.Context, name string, m configmap.Mapper, ri *fs.
 				fmt.Println(out.Option.Help)
 				in.Result = fmt.Sprint(Confirm(Default))
 			} else {
-				value := ChooseOption(out.Option, "")
+				value := ChooseOption(out.Option, name)
 				if value != "" {
 					err := out.Option.Set(value)
 					if err != nil {
-						return errors.Wrap(err, "failed to set option")
+						return fmt.Errorf("failed to set option: %w", err)
 					}
 				}
 				in.Result = out.Option.String()
@@ -290,6 +404,7 @@ func backendConfig(ctx context.Context, name string, m configmap.Mapper, ri *fs.
 		if out.State == "" {
 			break
 		}
+		newSection()
 	}
 	return nil
 }
@@ -317,58 +432,43 @@ func RemoteConfig(ctx context.Context, name string) error {
 
 // ChooseOption asks the user to choose an option
 func ChooseOption(o *fs.Option, name string) string {
-	fmt.Println(o.Help)
-	if o.IsPassword {
-		actions := []string{"yYes type in my own password", "gGenerate random password"}
-		defaultAction := -1
-		if !o.Required {
-			defaultAction = len(actions)
-			actions = append(actions, "nNo leave this optional password blank")
-		}
-		var password string
-		var err error
-		switch i := CommandDefault(actions, defaultAction); i {
-		case 'y':
-			password = ChangePassword("the")
-		case 'g':
-			for {
-				fmt.Printf("Password strength in bits.\n64 is just about memorable\n128 is secure\n1024 is the maximum\n")
-				bits := ChooseNumber("Bits", 64, 1024)
-				password, err = Password(bits)
-				if err != nil {
-					log.Fatalf("Failed to make password: %v", err)
-				}
-				fmt.Printf("Your password is: %s\n", password)
-				fmt.Printf("Use this password? Please note that an obscured version of this \npassword (and not the " +
-					"password itself) will be stored under your \nconfiguration file, so keep this generated password " +
-					"in a safe place.\n")
-				if Confirm(true) {
-					break
-				}
-			}
-		case 'n':
-			return ""
-		default:
-			fs.Errorf(nil, "Bad choice %c", i)
-		}
-		return obscure.MustObscure(password)
+	fmt.Printf("Option %s.\n", o.Name)
+	if o.Help != "" {
+		// Show help string without empty lines.
+		help := strings.ReplaceAll(strings.TrimSpace(o.Help), "\n\n", "\n")
+		fmt.Println(help)
 	}
-	what := fmt.Sprintf("%T value", o.Default)
-	switch o.Default.(type) {
-	case bool:
-		what = "boolean value (true or false)"
-	case fs.SizeSuffix:
-		what = "size with suffix K,M,G,T"
-	case fs.Duration:
-		what = "duration s,m,h,d,w,M,y"
-	case int, int8, int16, int32, int64:
-		what = "signed integer"
-	case uint, byte, uint16, uint32, uint64:
-		what = "unsigned integer"
+
+	var defaultValue string
+	if o.Default == nil {
+		defaultValue = ""
+	} else {
+		defaultValue = fmt.Sprint(o.Default)
+	}
+
+	if o.IsPassword {
+		return ChoosePassword(defaultValue, o.Required)
+	}
+
+	what := "value"
+	if o.Default != "" {
+		switch o.Default.(type) {
+		case bool:
+			what = "boolean value (true or false)"
+		case fs.SizeSuffix:
+			what = "size with suffix K,M,G,T"
+		case fs.Duration:
+			what = "duration s,m,h,d,w,M,y"
+		case int, int8, int16, int32, int64:
+			what = "signed integer"
+		case uint, byte, uint16, uint32, uint64:
+			what = "unsigned integer"
+		default:
+			what = fmt.Sprintf("%T value", o.Default)
+		}
 	}
 	var in string
 	for {
-		fmt.Printf("Enter a %s. Press Enter for the default (%q).\n", what, fmt.Sprint(o.Default))
 		if len(o.Examples) > 0 {
 			var values []string
 			var help []string
@@ -376,32 +476,26 @@ func ChooseOption(o *fs.Option, name string) string {
 				values = append(values, example.Value)
 				help = append(help, example.Help)
 			}
-			in = Choose(o.Name, values, help, !o.Exclusive)
+			in = Choose(o.Name, what, values, help, defaultValue, o.Required, !o.Exclusive)
 		} else {
-			fmt.Printf("%s> ", o.Name)
-			in = ReadLine()
+			in = Enter(o.Name, what, defaultValue, o.Required)
 		}
-		if in == "" {
-			if o.Required && fmt.Sprint(o.Default) == "" {
-				fmt.Printf("This value is required and it has no default.\n")
+		if in != "" {
+			newIn, err := configstruct.StringToInterface(o.Default, in)
+			if err != nil {
+				fmt.Printf("Failed to parse %q: %v\n", in, err)
 				continue
 			}
-			break
+			in = fmt.Sprint(newIn) // canonicalise
 		}
-		newIn, err := configstruct.StringToInterface(o.Default, in)
-		if err != nil {
-			fmt.Printf("Failed to parse %q: %v\n", in, err)
-			continue
-		}
-		in = fmt.Sprint(newIn) // canonicalise
-		break
+		return in
 	}
-	return in
 }
 
 // NewRemoteName asks the user for a name for a new remote
 func NewRemoteName() (name string) {
 	for {
+		fmt.Println("Enter name for new remote.")
 		fmt.Printf("name> ")
 		name = ReadLine()
 		if LoadedData().HasSection(name) {
@@ -441,7 +535,7 @@ func NewRemote(ctx context.Context, name string) error {
 		break
 	}
 	LoadedData().SetValue(name, "type", newType)
-
+	newSection()
 	_, err = CreateRemote(ctx, name, newType, nil, UpdateRemoteOpt{
 		All: true,
 	})
@@ -452,13 +546,15 @@ func NewRemote(ctx context.Context, name string) error {
 		SaveConfig()
 		return nil
 	}
+	newSection()
 	return EditRemote(ctx, ri, name)
 }
 
 // EditRemote gets the user to edit a remote
 func EditRemote(ctx context.Context, ri *fs.RegInfo, name string) error {
-	ShowRemote(name)
-	fmt.Printf("Edit remote\n")
+	fmt.Printf("Editing existing %q remote with options:\n", name)
+	listRemoteOptions(name)
+	newSection()
 	for {
 		_, err := UpdateRemote(ctx, name, nil, UpdateRemoteOpt{
 			All: true,
@@ -545,35 +641,50 @@ func EditConfig(ctx context.Context) (err error) {
 			ShowRemotes()
 			fmt.Printf("\n")
 		} else {
-			fmt.Printf("No remotes found - make a new one\n")
+			fmt.Printf("No remotes found, make a new one?\n")
 			// take 2nd item and last 2 items of menu list
 			what = append(what[1:2], what[len(what)-2:]...)
 		}
 		switch i := Command(what); i {
 		case 'e':
+			newSection()
 			name := ChooseRemote()
+			newSection()
 			fs := mustFindByName(name)
 			err = EditRemote(ctx, fs, name)
 			if err != nil {
 				return err
 			}
 		case 'n':
-			err = NewRemote(ctx, NewRemoteName())
+			newSection()
+			name := NewRemoteName()
+			newSection()
+			err = NewRemote(ctx, name)
 			if err != nil {
 				return err
 			}
 		case 'd':
+			newSection()
 			name := ChooseRemote()
+			newSection()
 			DeleteRemote(name)
 		case 'r':
-			RenameRemote(ChooseRemote())
+			newSection()
+			name := ChooseRemote()
+			newSection()
+			RenameRemote(name)
 		case 'c':
-			CopyRemote(ChooseRemote())
+			newSection()
+			name := ChooseRemote()
+			newSection()
+			CopyRemote(name)
 		case 's':
+			newSection()
 			SetPassword()
 		case 'q':
 			return nil
 		}
+		newSection()
 	}
 }
 

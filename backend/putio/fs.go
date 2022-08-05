@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/putdotio/go-putio/putio"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/configmap"
@@ -80,7 +80,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (f fs.Fs,
 	httpClient := fshttp.NewClient(ctx)
 	oAuthClient, _, err := oauthutil.NewClientWithBaseClient(ctx, name, m, putioConfig, httpClient)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to configure putio")
+		return nil, fmt.Errorf("failed to configure putio: %w", err)
 	}
 	p := &Fs{
 		name:        name,
@@ -230,7 +230,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 
 // Put the object
 //
-// Copy the reader in to the new object which is returned
+// Copy the reader in to the new object which is returned.
 //
 // The new object may have been created if an error is returned
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (o fs.Object, err error) {
@@ -302,8 +302,8 @@ func (f *Fs) createUpload(ctx context.Context, name string, size int64, parentID
 		if err != nil {
 			return false, err
 		}
-		if resp.StatusCode != 201 {
-			return false, fmt.Errorf("unexpected status code from upload create: %d", resp.StatusCode)
+		if err := checkStatusCode(resp, 201); err != nil {
+			return shouldRetry(ctx, err)
 		}
 		location = resp.Header.Get("location")
 		if location == "" {
@@ -469,7 +469,7 @@ func (f *Fs) purgeCheck(ctx context.Context, dir string, check bool) (err error)
 	// check directory exists
 	directoryID, err := f.dirCache.FindDir(ctx, dir, false)
 	if err != nil {
-		return errors.Wrap(err, "Rmdir")
+		return fmt.Errorf("Rmdir: %w", err)
 	}
 	dirID := atoi(directoryID)
 
@@ -482,7 +482,7 @@ func (f *Fs) purgeCheck(ctx context.Context, dir string, check bool) (err error)
 			return shouldRetry(ctx, err)
 		})
 		if err != nil {
-			return errors.Wrap(err, "Rmdir")
+			return fmt.Errorf("Rmdir: %w", err)
 		}
 		if len(children) != 0 {
 			return errors.New("directory not empty")
@@ -523,9 +523,9 @@ func (f *Fs) Purge(ctx context.Context, dir string) (err error) {
 
 // Copy src to this remote using server-side copy operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -562,9 +562,9 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (o fs.Objec
 
 // Move src to this remote using server-side move operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -647,7 +647,7 @@ func (f *Fs) About(ctx context.Context) (usage *fs.Usage, err error) {
 		return shouldRetry(ctx, err)
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "about failed")
+		return nil, err
 	}
 	return &fs.Usage{
 		Total: fs.NewUsageValue(ai.Disk.Size),  // quota of bytes that can be used

@@ -1,16 +1,18 @@
+//go:build linux || freebsd
 // +build linux freebsd
 
 package mount
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
+	"syscall"
 	"time"
 
 	"bazil.org/fuse"
 	fusefs "bazil.org/fuse/fs"
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/cmd/mountlib"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/log"
@@ -37,7 +39,6 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) (err error) {
 	a.Atime = modTime
 	a.Mtime = modTime
 	a.Ctime = modTime
-	a.Crtime = modTime
 	// FIXME include Valid so get some caching?
 	// FIXME fs.Debugf(d.path, "Dir.Attr %+v", a)
 	return nil
@@ -198,7 +199,7 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fusefs
 	defer log.Trace(d, "oldName=%q, newName=%q, newDir=%+v", req.OldName, req.NewName, newDir)("err=%v", &err)
 	destDir, ok := newDir.(*Dir)
 	if !ok {
-		return errors.Errorf("Unknown Dir type %T", newDir)
+		return fmt.Errorf("unknown Dir type %T", newDir)
 	}
 
 	err = d.Dir.Rename(req.OldName, req.NewName, destDir.Dir)
@@ -236,7 +237,7 @@ var _ fusefs.NodeLinker = (*Dir)(nil)
 // existing Node. Receiver must be a directory.
 func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fusefs.Node) (newNode fusefs.Node, err error) {
 	defer log.Trace(d, "req=%v, old=%v", req, old)("new=%v, err=%v", &newNode, &err)
-	return nil, fuse.ENOSYS
+	return nil, syscall.ENOSYS
 }
 
 // Check interface satisfied

@@ -3,11 +3,10 @@ package fs
 
 import (
 	"context"
+	"errors"
 	"io"
 	"math"
 	"time"
-
-	"github.com/pkg/errors"
 )
 
 // Constants
@@ -37,10 +36,11 @@ var (
 	ErrorListAborted                 = errors.New("list aborted")
 	ErrorListBucketRequired          = errors.New("bucket or container name is needed in remote")
 	ErrorIsFile                      = errors.New("is a file not a directory")
+	ErrorIsDir                       = errors.New("is a directory not a file")
 	ErrorNotAFile                    = errors.New("is not a regular file")
 	ErrorNotDeleting                 = errors.New("not deleting files as there were IO errors")
 	ErrorNotDeletingDirs             = errors.New("not deleting directories as there were IO errors")
-	ErrorOverlapping                 = errors.New("can't sync or move files on overlapping remotes")
+	ErrorOverlapping                 = errors.New("can't sync or move files on overlapping remotes (try excluding the destination with a filter rule)")
 	ErrorDirectoryNotEmpty           = errors.New("directory not empty")
 	ErrorImmutableModified           = errors.New("immutable file modified")
 	ErrorPermissionDenied            = errors.New("permission denied")

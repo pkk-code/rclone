@@ -1,6 +1,7 @@
 // Test AzureBlob filesystem interface
 
-// +build !plan9,!solaris,!js,go1.14
+//go:build !plan9 && !solaris && !js
+// +build !plan9,!solaris,!js
 
 package azureblob
 
@@ -16,12 +17,10 @@ import (
 // TestIntegration runs integration tests against the remote
 func TestIntegration(t *testing.T) {
 	fstests.Run(t, &fstests.Opt{
-		RemoteName:  "TestAzureBlob:",
-		NilObject:   (*Object)(nil),
-		TiersToTest: []string{"Hot", "Cool"},
-		ChunkedUpload: fstests.ChunkedUploadConfig{
-			MaxChunkSize: maxChunkSize,
-		},
+		RemoteName:    "TestAzureBlob:",
+		NilObject:     (*Object)(nil),
+		TiersToTest:   []string{"Hot", "Cool"},
+		ChunkedUpload: fstests.ChunkedUploadConfig{},
 	})
 }
 
@@ -61,4 +60,26 @@ func TestServicePrincipalFileFailure(t *testing.T) {
 	_, err := newServicePrincipalTokenRefresher(ctx, []byte(credentials))
 	assert.Error(t, err)
 	assert.EqualError(t, err, "error creating service principal token: parameter 'secret' cannot be empty")
+}
+
+func TestValidateAccessTier(t *testing.T) {
+	tests := map[string]struct {
+		accessTier string
+		want       bool
+	}{
+		"hot":     {"hot", true},
+		"HOT":     {"HOT", true},
+		"Hot":     {"Hot", true},
+		"cool":    {"cool", true},
+		"archive": {"archive", true},
+		"empty":   {"", false},
+		"unknown": {"unknown", false},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := validateAccessTier(test.accessTier)
+			assert.Equal(t, test.want, got)
+		})
+	}
 }

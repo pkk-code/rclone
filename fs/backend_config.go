@@ -6,11 +6,11 @@ package fs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs/config/configmap"
 )
 
@@ -176,7 +176,13 @@ func ConfigConfirm(state string, Default bool, name string, help string) (*Confi
 	}, nil
 }
 
-// ConfigChooseFixed returns a ConfigOut structure which has a list of items to choose from.
+// ConfigChooseExclusiveFixed returns a ConfigOut structure which has a list of
+// items to choose from.
+//
+// Possible items must be supplied as a fixed list.
+//
+// User is required to supply a value, and is restricted to the specified list,
+// i.e. free text input is not allowed.
 //
 // state should be the next state required
 // name is the config name for this item
@@ -185,10 +191,10 @@ func ConfigConfirm(state string, Default bool, name string, help string) (*Confi
 //
 // It chooses the first item to be the default.
 // If there are no items then it will return an error.
-// If there is only one item it will short cut to the next state
-func ConfigChooseFixed(state string, name string, help string, items []OptionExample) (*ConfigOut, error) {
+// If there is only one item it will short cut to the next state.
+func ConfigChooseExclusiveFixed(state string, name string, help string, items []OptionExample) (*ConfigOut, error) {
 	if len(items) == 0 {
-		return nil, errors.Errorf("no items found in: %s", help)
+		return nil, fmt.Errorf("no items found in: %s", help)
 	}
 	choose := &ConfigOut{
 		State: state,
@@ -208,7 +214,13 @@ func ConfigChooseFixed(state string, name string, help string, items []OptionExa
 	return choose, nil
 }
 
-// ConfigChoose returns a ConfigOut structure which has a list of items to choose from.
+// ConfigChooseExclusive returns a ConfigOut structure which has a list of
+// items to choose from.
+//
+// Possible items are retrieved from a supplied function.
+//
+// User is required to supply a value, and is restricted to the specified list,
+// i.e. free text input is not allowed.
 //
 // state should be the next state required
 // name is the config name for this item
@@ -218,7 +230,60 @@ func ConfigChooseFixed(state string, name string, help string, items []OptionExa
 //
 // It chooses the first item to be the default.
 // If there are no items then it will return an error.
-// If there is only one item it will short cut to the next state
+// If there is only one item it will short cut to the next state.
+func ConfigChooseExclusive(state string, name string, help string, n int, getItem func(i int) (itemValue string, itemHelp string)) (*ConfigOut, error) {
+	items := make(OptionExamples, n)
+	for i := range items {
+		items[i].Value, items[i].Help = getItem(i)
+	}
+	return ConfigChooseExclusiveFixed(state, name, help, items)
+}
+
+// ConfigChooseFixed returns a ConfigOut structure which has a list of
+// suggested items.
+//
+// Suggested items must be supplied as a fixed list.
+//
+// User is required to supply a value, but is not restricted to the specified
+// list, i.e. free text input is accepted.
+//
+// state should be the next state required
+// name is the config name for this item
+// help should be the help shown to the user
+// items should be the items in the list
+//
+// It chooses the first item to be the default.
+func ConfigChooseFixed(state string, name string, help string, items []OptionExample) (*ConfigOut, error) {
+	choose := &ConfigOut{
+		State: state,
+		Option: &Option{
+			Name:     name,
+			Help:     help,
+			Examples: items,
+			Required: true,
+		},
+	}
+	if len(choose.Option.Examples) > 0 {
+		choose.Option.Default = choose.Option.Examples[0].Value
+	}
+	return choose, nil
+}
+
+// ConfigChoose returns a ConfigOut structure which has a list of suggested
+// items.
+//
+// Suggested items are retrieved from a supplied function.
+//
+// User is required to supply a value, but is not restricted to the specified
+// list, i.e. free text input is accepted.
+//
+// state should be the next state required
+// name is the config name for this item
+// help should be the help shown to the user
+// n should be the number of items in the list
+// getItem should return the items (value, help)
+//
+// It chooses the first item to be the default.
 func ConfigChoose(state string, name string, help string, n int, getItem func(i int) (itemValue string, itemHelp string)) (*ConfigOut, error) {
 	items := make(OptionExamples, n)
 	for i := range items {
@@ -230,7 +295,7 @@ func ConfigChoose(state string, name string, help string, n int, getItem func(i 
 // StatePush pushes a new values onto the front of the config string
 func StatePush(state string, values ...string) string {
 	for i := range values {
-		values[i] = strings.Replace(values[i], ",", "，", -1) // replace comma with unicode wide version
+		values[i] = strings.ReplaceAll(values[i], ",", "，") // replace comma with unicode wide version
 	}
 	if state != "" {
 		values = append(values[:len(values):len(values)], state)
@@ -262,7 +327,7 @@ func StatePop(state string) (newState string, value string) {
 		return "", state
 	}
 	value, newState = state[:comma], state[comma+1:]
-	value = strings.Replace(value, "，", ",", -1) // replace unicode wide comma with comma
+	value = strings.ReplaceAll(value, "，", ",") // replace unicode wide comma with comma
 	return newState, value
 }
 
@@ -323,7 +388,7 @@ func configAll(ctx context.Context, name string, m configmap.Mapper, ri *RegInfo
 	if stateNumber != "" {
 		optionNumber, err = strconv.Atoi(stateNumber)
 		if err != nil {
-			return nil, errors.Wrap(err, "internal error: bad state number")
+			return nil, fmt.Errorf("internal error: bad state number: %w", err)
 		}
 	}
 
@@ -393,7 +458,7 @@ func configAll(ctx context.Context, name string, m configmap.Mapper, ri *RegInfo
 		}
 		return ConfigGoto("*postconfig")
 	}
-	return nil, errors.Errorf("internal error: bad state %q", state)
+	return nil, fmt.Errorf("internal error: bad state %q", state)
 }
 
 func backendConfigStep(ctx context.Context, name string, m configmap.Mapper, ri *RegInfo, choices configmap.Getter, in ConfigIn) (out *ConfigOut, err error) {
@@ -415,7 +480,7 @@ func backendConfigStep(ctx context.Context, name string, m configmap.Mapper, ri 
 		in.State = ""
 		return backendConfigStep(ctx, name, m, ri, choices, in)
 	case strings.HasPrefix(in.State, "*"):
-		err = errors.Errorf("unknown internal state %q", in.State)
+		err = fmt.Errorf("unknown internal state %q", in.State)
 	default:
 		// Otherwise pass to backend
 		if ri.Config == nil {

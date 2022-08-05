@@ -3,6 +3,7 @@ package oauthutil
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"net"
@@ -12,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/config/configmap"
@@ -76,21 +76,21 @@ All done. Please go back to rclone.
 // SharedOptions are shared between backends the utilize an OAuth flow
 var SharedOptions = []fs.Option{{
 	Name: config.ConfigClientID,
-	Help: "OAuth Client Id\nLeave blank normally.",
+	Help: "OAuth Client Id.\n\nLeave blank normally.",
 }, {
 	Name: config.ConfigClientSecret,
-	Help: "OAuth Client Secret\nLeave blank normally.",
+	Help: "OAuth Client Secret.\n\nLeave blank normally.",
 }, {
 	Name:     config.ConfigToken,
 	Help:     "OAuth Access Token as a JSON blob.",
 	Advanced: true,
 }, {
 	Name:     config.ConfigAuthURL,
-	Help:     "Auth server URL.\nLeave blank to use the provider defaults.",
+	Help:     "Auth server URL.\n\nLeave blank to use the provider defaults.",
 	Advanced: true,
 }, {
 	Name:     config.ConfigTokenURL,
-	Help:     "Token server url.\nLeave blank to use the provider defaults.",
+	Help:     "Token server url.\n\nLeave blank to use the provider defaults.",
 	Advanced: true,
 }}
 
@@ -110,7 +110,7 @@ type oldToken struct {
 func GetToken(name string, m configmap.Mapper) (*oauth2.Token, error) {
 	tokenString, ok := m.Get(config.ConfigToken)
 	if !ok || tokenString == "" {
-		return nil, errors.Errorf("empty token found - please run \"rclone config reconnect %s:\"", name)
+		return nil, fmt.Errorf("empty token found - please run \"rclone config reconnect %s:\"", name)
 	}
 	token := new(oauth2.Token)
 	err := json.Unmarshal([]byte(tokenString), token)
@@ -245,7 +245,7 @@ func (ts *TokenSource) Token() (*oauth2.Token, error) {
 		time.Sleep(1 * time.Second)
 	}
 	if err != nil {
-		return nil, errors.Wrapf(err, "couldn't fetch token - maybe it has expired? - refresh with \"rclone config reconnect %s:\"", ts.name)
+		return nil, fmt.Errorf("couldn't fetch token - maybe it has expired? - refresh with \"rclone config reconnect %s:\": %w", ts.name, err)
 	}
 	changed = changed || (*token != *ts.token)
 	ts.token = token
@@ -256,7 +256,7 @@ func (ts *TokenSource) Token() (*oauth2.Token, error) {
 		}
 		err = PutToken(ts.name, ts.m, token, false)
 		if err != nil {
-			return nil, errors.Wrap(err, "couldn't store token")
+			return nil, fmt.Errorf("couldn't store token: %w", err)
 		}
 	}
 	return token, nil
@@ -267,6 +267,23 @@ func (ts *TokenSource) Invalidate() {
 	ts.mu.Lock()
 	ts.token.AccessToken = ""
 	ts.mu.Unlock()
+}
+
+// Expire marks the token as expired
+//
+// This also marks the token in the config file as expired, if it is the same one
+func (ts *TokenSource) Expire() error {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.token.Expiry = time.Now().Add(time.Hour * (-1)) // expire token
+	t, err := GetToken(ts.name, ts.m)
+	if err != nil {
+		return err
+	}
+	if t.AccessToken == ts.token.AccessToken {
+		err = PutToken(ts.name, ts.m, ts.token, false)
+	}
+	return err
 }
 
 // timeToExpiry returns how long until the token expires
@@ -280,7 +297,7 @@ func (ts *TokenSource) timeToExpiry() time.Duration {
 	if t.Expiry.IsZero() {
 		return 3e9 * time.Second // ~95 years
 	}
-	return t.Expiry.Sub(time.Now())
+	return time.Until(t.Expiry)
 }
 
 // OnExpiry returns a channel which has the time written to it when
@@ -416,10 +433,10 @@ func ConfigOut(state string, oAuth *Options) (*fs.ConfigOut, error) {
 //
 // This is called with a state which has pushed on it
 //
-//    state prefixed with "*oauth"
-//    state for oauth to return to
-//    state that returned the OAuth when we wish to recall it
-//    value that returned the OAuth
+//	state prefixed with "*oauth"
+//	state for oauth to return to
+//	state that returned the OAuth when we wish to recall it
+//	value that returned the OAuth
 func ConfigOAuth(ctx context.Context, name string, m configmap.Mapper, ri *fs.RegInfo, in fs.ConfigIn) (*fs.ConfigOut, error) {
 	stateParams, state := fs.StatePop(in.State)
 
@@ -442,7 +459,7 @@ func ConfigOAuth(ctx context.Context, name string, m configmap.Mapper, ri *fs.Re
 		}
 		opt, ok := out.OAuth.(*Options)
 		if !ok {
-			return nil, errors.Errorf("internal error: oauth failed: wrong type in config: %T", out.OAuth)
+			return nil, fmt.Errorf("internal error: oauth failed: wrong type in config: %T", out.OAuth)
 		}
 		if opt.OAuth2Config == nil {
 			return nil, errors.New("internal error: oauth failed: OAuth2Config not set")
@@ -499,7 +516,7 @@ version recommended):
 		// Encode them into a string
 		mCopyString, err := inM.Encode()
 		if err != nil {
-			return nil, errors.Wrap(err, "oauthutil authorize encode")
+			return nil, fmt.Errorf("oauthutil authorize encode: %w", err)
 		}
 		// Write what the user has to do
 		if len(mCopyString) > 0 {
@@ -547,7 +564,7 @@ version recommended):
 			oauthConfig = fixRedirect(oauthConfig)
 			code, err = configSetup(ctx, ri.Name, name, m, oauthConfig, opt)
 			if err != nil {
-				return nil, errors.Wrap(err, "config failed to refresh token")
+				return nil, fmt.Errorf("config failed to refresh token: %w", err)
 			}
 		}
 		err = configExchange(ctx, name, m, oauthConfig, code)
@@ -560,7 +577,7 @@ version recommended):
 		_, returnState := fs.StatePop(stateParams)
 		return fs.ConfigGoto(returnState)
 	}
-	return nil, errors.Errorf("unknown internal oauth state %q", state)
+	return nil, fmt.Errorf("unknown internal oauth state %q", state)
 }
 
 func init() {
@@ -607,7 +624,7 @@ func fixRedirect(oauthConfig *oauth2.Config) *oauth2.Config {
 
 // configSetup does the initial creation of the token
 //
-// If opt is nil it will use the default Options
+// If opt is nil it will use the default Options.
 //
 // It will run an internal webserver to receive the results
 func configSetup(ctx context.Context, id, name string, m configmap.Mapper, oauthConfig *oauth2.Config, opt *Options) (string, error) {
@@ -626,7 +643,7 @@ func configSetup(ctx context.Context, id, name string, m configmap.Mapper, oauth
 	server := newAuthServer(opt, bindAddress, state, authURL)
 	err = server.Init()
 	if err != nil {
-		return "", errors.Wrap(err, "failed to start auth webserver")
+		return "", fmt.Errorf("failed to start auth webserver: %w", err)
 	}
 	go server.Serve()
 	defer server.Stop()
@@ -662,7 +679,7 @@ func configExchange(ctx context.Context, name string, m configmap.Mapper, oauthC
 	ctx = Context(ctx, fshttp.NewClient(ctx))
 	token, err := oauthConfig.Exchange(ctx, code)
 	if err != nil {
-		return errors.Wrap(err, "failed to get token")
+		return fmt.Errorf("failed to get token: %w", err)
 	}
 	return PutToken(name, m, token, true)
 }
@@ -691,6 +708,11 @@ func newAuthServer(opt *Options, bindAddress, state, authURL string) *authServer
 
 // Receive the auth request
 func (s *authServer) handleAuth(w http.ResponseWriter, req *http.Request) {
+	if req.URL.Path != "/" {
+		fs.Debugf(nil, "Ignoring %s request on auth server to %q", req.Method, req.URL.Path)
+		http.NotFound(w, req)
+		return
+	}
 	fs.Debugf(nil, "Received %s request on auth server to %q", req.Method, req.URL.Path)
 
 	// Reply with the response to the user and to the channel
@@ -752,10 +774,6 @@ func (s *authServer) Init() error {
 	}
 	s.server.SetKeepAlivesEnabled(false)
 
-	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, req *http.Request) {
-		http.Error(w, "", http.StatusNotFound)
-		return
-	})
 	mux.HandleFunc("/auth", func(w http.ResponseWriter, req *http.Request) {
 		state := req.FormValue("state")
 		if state != s.state {
@@ -765,7 +783,6 @@ func (s *authServer) Init() error {
 		}
 		fs.Debugf(nil, "Redirecting browser to: %s", s.authURL)
 		http.Redirect(w, req, s.authURL, http.StatusTemporaryRedirect)
-		return
 	})
 	mux.HandleFunc("/", s.handleAuth)
 

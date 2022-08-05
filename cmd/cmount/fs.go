@@ -1,6 +1,6 @@
+//go:build cmount && ((linux && cgo) || (darwin && cgo) || (freebsd && cgo) || windows)
 // +build cmount
-// +build cgo
-// +build linux darwin freebsd windows
+// +build linux,cgo darwin,cgo freebsd,cgo windows
 
 package cmount
 
@@ -12,12 +12,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/billziss-gh/cgofuse/fuse"
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/cmd/mountlib"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/log"
 	"github.com/rclone/rclone/vfs"
+	"github.com/winfsp/cgofuse/fuse"
 )
 
 const fhUnset = ^uint64(0)
@@ -545,21 +545,25 @@ func (fsys *FS) Fsyncdir(path string, datasync bool, fh uint64) (errc int) {
 
 // Setxattr sets extended attributes.
 func (fsys *FS) Setxattr(path string, name string, value []byte, flags int) (errc int) {
+	defer log.Trace(path, "name=%q, value=%q, flags=%d", name, value, flags)("errc=%d", &errc)
 	return -fuse.ENOSYS
 }
 
 // Getxattr gets extended attributes.
 func (fsys *FS) Getxattr(path string, name string) (errc int, value []byte) {
+	defer log.Trace(path, "name=%q", name)("errc=%d, value=%q", &errc, &value)
 	return -fuse.ENOSYS, nil
 }
 
 // Removexattr removes extended attributes.
 func (fsys *FS) Removexattr(path string, name string) (errc int) {
+	defer log.Trace(path, "name=%q", name)("errc=%d", &errc)
 	return -fuse.ENOSYS
 }
 
 // Listxattr lists extended attributes.
 func (fsys *FS) Listxattr(path string, fill func(name string) bool) (errc int) {
+	defer log.Trace(path, "fill=%p", fill)("errc=%d", &errc)
 	return -fuse.ENOSYS
 }
 
@@ -568,7 +572,8 @@ func translateError(err error) (errc int) {
 	if err == nil {
 		return 0
 	}
-	switch errors.Cause(err) {
+	_, uErr := fserrors.Cause(err)
+	switch uErr {
 	case vfs.OK:
 		return 0
 	case vfs.ENOENT, fs.ErrorDirNotFound, fs.ErrorObjectNotFound:

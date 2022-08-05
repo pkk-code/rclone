@@ -15,7 +15,6 @@ import (
 	"runtime/debug"
 	"strings"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/config/configfile"
@@ -73,7 +72,7 @@ func writeError(path string, in rc.Params, err error, status int) (string, int) 
 
 // RPC runs a transaction over the RC
 //
-// Calling an rc function using JSON to input parameters and output the resulted JSON
+// Calling an rc function using JSON to input parameters and output the resulted JSON.
 //
 // operations/uploadfile and core/command are not supported as they need request or response object
 // modified from handlePost in rcserver.go
@@ -89,25 +88,27 @@ func RPC(method string, input string) (output string, status int) {
 	}()
 
 	// create a buffer to capture the output
-	err := json.NewDecoder(strings.NewReader(input)).Decode(&in)
-	if err != nil {
-		return writeError(method, in, errors.Wrap(err, "failed to read input JSON"), http.StatusBadRequest)
+	if input != "" {
+		err := json.NewDecoder(strings.NewReader(input)).Decode(&in)
+		if err != nil {
+			return writeError(method, in, fmt.Errorf("failed to read input JSON: %w", err), http.StatusBadRequest)
+		}
 	}
 
 	// Find the call
 	call := rc.Calls.Get(method)
 	if call == nil {
-		return writeError(method, in, errors.Errorf("couldn't find method %q", method), http.StatusNotFound)
+		return writeError(method, in, fmt.Errorf("couldn't find method %q", method), http.StatusNotFound)
 	}
 
 	// TODO: handle these cases
 	if call.NeedsRequest {
-		return writeError(method, in, errors.Errorf("method %q needs request, not supported", method), http.StatusNotFound)
+		return writeError(method, in, fmt.Errorf("method %q needs request, not supported", method), http.StatusNotFound)
 		// Add the request to RC
 		//in["_request"] = r
 	}
 	if call.NeedsResponse {
-		return writeError(method, in, errors.Errorf("method %q need response, not supported", method), http.StatusNotFound)
+		return writeError(method, in, fmt.Errorf("method %q need response, not supported", method), http.StatusNotFound)
 		//in["_response"] = w
 	}
 

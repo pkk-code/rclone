@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/backend/onedrive/api"
 	"github.com/rclone/rclone/backend/onedrive/quickxorhash"
 	"github.com/rclone/rclone/fs"
@@ -65,9 +65,12 @@ var (
 	authPath  = "/common/oauth2/v2.0/authorize"
 	tokenPath = "/common/oauth2/v2.0/token"
 
+	scopeAccess             = fs.SpaceSepList{"Files.Read", "Files.ReadWrite", "Files.Read.All", "Files.ReadWrite.All", "Sites.Read.All", "offline_access"}
+	scopeAccessWithoutSites = fs.SpaceSepList{"Files.Read", "Files.ReadWrite", "Files.Read.All", "Files.ReadWrite.All", "offline_access"}
+
 	// Description of how to auth for this app for a business account
 	oauthConfig = &oauth2.Config{
-		Scopes:       []string{"Files.Read", "Files.ReadWrite", "Files.Read.All", "Files.ReadWrite.All", "offline_access", "Sites.Read.All"},
+		Scopes:       scopeAccess,
 		ClientID:     rcloneClientID,
 		ClientSecret: obscure.MustReveal(rcloneEncryptedClientSecret),
 		RedirectURL:  oauthutil.RedirectLocalhostURL,
@@ -115,7 +118,7 @@ func init() {
 					Help:  "Microsoft Cloud Germany",
 				}, {
 					Value: regionCN,
-					Help:  "Azure and Office 365 operated by 21Vianet in China",
+					Help:  "Azure and Office 365 operated by Vnet Group in China",
 				},
 			},
 		}, {
@@ -129,19 +132,61 @@ Note that the chunks will be buffered into memory.`,
 			Advanced: true,
 		}, {
 			Name:     "drive_id",
-			Help:     "The ID of the drive to use",
+			Help:     "The ID of the drive to use.",
 			Default:  "",
 			Advanced: true,
 		}, {
 			Name:     "drive_type",
-			Help:     "The type of the drive ( " + driveTypePersonal + " | " + driveTypeBusiness + " | " + driveTypeSharepoint + " )",
+			Help:     "The type of the drive (" + driveTypePersonal + " | " + driveTypeBusiness + " | " + driveTypeSharepoint + ").",
 			Default:  "",
 			Advanced: true,
+		}, {
+			Name: "root_folder_id",
+			Help: `ID of the root folder.
+
+This isn't normally needed, but in special circumstances you might
+know the folder ID that you wish to access but not be able to get
+there through a path traversal.
+`,
+			Advanced: true,
+		}, {
+			Name: "access_scopes",
+			Help: `Set scopes to be requested by rclone.
+
+Choose or manually enter a custom space separated list with all scopes, that rclone should request.
+`,
+			Default:  scopeAccess,
+			Advanced: true,
+			Examples: []fs.OptionExample{
+				{
+					Value: "Files.Read Files.ReadWrite Files.Read.All Files.ReadWrite.All Sites.Read.All offline_access",
+					Help:  "Read and write access to all resources",
+				},
+				{
+					Value: "Files.Read Files.Read.All Sites.Read.All offline_access",
+					Help:  "Read only access to all resources",
+				},
+				{
+					Value: "Files.Read Files.ReadWrite Files.Read.All Files.ReadWrite.All offline_access",
+					Help:  "Read and write access to all resources, without the ability to browse SharePoint sites. \nSame as if disable_site_permission was set to true",
+				},
+			}}, {
+			Name: "disable_site_permission",
+			Help: `Disable the request for Sites.Read.All permission.
+
+If set to true, you will no longer be able to search for a SharePoint site when
+configuring drive ID, because rclone will not request Sites.Read.All permission.
+Set it to true if your organization didn't assign Sites.Read.All permission to the
+application, and your organization disallows users to consent app permission
+request on their own.`,
+			Default:  false,
+			Advanced: true,
+			Hide:     fs.OptionHideBoth,
 		}, {
 			Name: "expose_onenote_files",
 			Help: `Set to make OneNote files show up in directory listings.
 
-By default rclone will hide OneNote files in directory listings because
+By default, rclone will hide OneNote files in directory listings because
 operations like "Open" and "Update" won't work on them.  But this
 behaviour may also prevent you from deleting them.  If you want to
 delete OneNote files or otherwise want them to show up in directory
@@ -165,7 +210,7 @@ fall back to normal copy (which will be slightly slower).`,
 		}, {
 			Name:    "no_versions",
 			Default: false,
-			Help: `Remove all versions on modifying operations
+			Help: `Remove all versions on modifying operations.
 
 Onedrive for business creates versions when rclone uploads new files
 overwriting an existing one and when it sets the modification time.
@@ -186,10 +231,10 @@ this flag there.
 			Advanced: true,
 			Examples: []fs.OptionExample{{
 				Value: "anonymous",
-				Help:  "Anyone with the link has access, without needing to sign in. This may include people outside of your organization. Anonymous link support may be disabled by an administrator.",
+				Help:  "Anyone with the link has access, without needing to sign in.\nThis may include people outside of your organization.\nAnonymous link support may be disabled by an administrator.",
 			}, {
 				Value: "organization",
-				Help:  "Anyone signed into your organization (tenant) can use the link to get access. Only available in OneDrive for Business and SharePoint.",
+				Help:  "Anyone signed into your organization (tenant) can use the link to get access.\nOnly available in OneDrive for Business and SharePoint.",
 			}},
 		}, {
 			Name:     "link_type",
@@ -277,6 +322,10 @@ type siteResource struct {
 }
 type siteResponse struct {
 	Sites []siteResource `json:"value"`
+}
+type deltaResponse struct {
+	DeltaLink string     `json:"@odata.deltaLink"`
+	Value     []api.Item `json:"value"`
 }
 
 // Get the region and graphURL from the config
@@ -374,6 +423,17 @@ func Config(ctx context.Context, name string, m configmap.Mapper, config fs.Conf
 	region, graphURL := getRegionURL(m)
 
 	if config.State == "" {
+		var accessScopes fs.SpaceSepList
+		accessScopesString, _ := m.Get("access_scopes")
+		err := accessScopes.Set(accessScopesString)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse access_scopes: %w", err)
+		}
+		oauthConfig.Scopes = []string(accessScopes)
+		disableSitePermission, _ := m.Get("disable_site_permission")
+		if disableSitePermission == "true" {
+			oauthConfig.Scopes = scopeAccessWithoutSites
+		}
 		oauthConfig.Endpoint = oauth2.Endpoint{
 			AuthURL:  authEndpoint[region] + authPath,
 			TokenURL: authEndpoint[region] + tokenPath,
@@ -385,13 +445,13 @@ func Config(ctx context.Context, name string, m configmap.Mapper, config fs.Conf
 
 	oAuthClient, _, err := oauthutil.NewClient(ctx, name, m, oauthConfig)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to configure OneDrive")
+		return nil, fmt.Errorf("failed to configure OneDrive: %w", err)
 	}
 	srv := rest.NewClient(oAuthClient)
 
 	switch config.State {
 	case "choose_type":
-		return fs.ConfigChooseFixed("choose_type_done", "config_type", "Type of connection", []fs.OptionExample{{
+		return fs.ConfigChooseExclusiveFixed("choose_type_done", "config_type", "Type of connection", []fs.OptionExample{{
 			Value: "onedrive",
 			Help:  "OneDrive Personal or Business",
 		}, {
@@ -399,7 +459,7 @@ func Config(ctx context.Context, name string, m configmap.Mapper, config fs.Conf
 			Help:  "Root Sharepoint site",
 		}, {
 			Value: "url",
-			Help:  "Sharepoint site name or URL (e.g. mysite or https://contoso.sharepoint.com/sites/mysite)",
+			Help:  "Sharepoint site name or URL\nE.g. mysite or https://contoso.sharepoint.com/sites/mysite",
 		}, {
 			Value: "search",
 			Help:  "Search for a Sharepoint site",
@@ -411,7 +471,7 @@ func Config(ctx context.Context, name string, m configmap.Mapper, config fs.Conf
 			Help:  "Type in SiteID (advanced)",
 		}, {
 			Value: "path",
-			Help:  "Sharepoint server-relative path (advanced, e.g. /teams/hr)",
+			Help:  "Sharepoint server-relative path (advanced)\nE.g. /teams/hr",
 		}})
 	case "choose_type_done":
 		// Jump to next state according to config chosen
@@ -527,6 +587,9 @@ type Options struct {
 	ChunkSize               fs.SizeSuffix        `config:"chunk_size"`
 	DriveID                 string               `config:"drive_id"`
 	DriveType               string               `config:"drive_type"`
+	RootFolderID            string               `config:"root_folder_id"`
+	DisableSitePermission   bool                 `config:"disable_site_permission"`
+	AccessScopes            fs.SpaceSepList      `config:"access_scopes"`
 	ExposeOneNoteFiles      bool                 `config:"expose_onenote_files"`
 	ServerSideAcrossConfigs bool                 `config:"server_side_across_configs"`
 	ListChunk               int64                `config:"list_chunk"`
@@ -618,8 +681,14 @@ func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, err
 	retry := false
 	if resp != nil {
 		switch resp.StatusCode {
+		case 400:
+			if apiErr, ok := err.(*api.Error); ok {
+				if apiErr.ErrorInfo.InnerError.Code == "pathIsTooLong" {
+					return false, fserrors.NoRetryError(err)
+				}
+			}
 		case 401:
-			if len(resp.Header["Www-Authenticate"]) == 1 && strings.Index(resp.Header["Www-Authenticate"][0], "expired_token") >= 0 {
+			if len(resp.Header["Www-Authenticate"]) == 1 && strings.Contains(resp.Header["Www-Authenticate"][0], "expired_token") {
 				retry = true
 				fs.Debugf(nil, "Should retry: %v", err)
 			} else if err != nil && strings.Contains(err.Error(), "Unable to initialize RPS") {
@@ -658,7 +727,7 @@ func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, err
 // "shared with me" folders in OneDrive Personal (See #2536, #2778)
 // This path pattern comes from https://github.com/OneDrive/onedrive-api-docs/issues/908#issuecomment-417488480
 //
-// If `relPath` == '', do not append the slash (See #3664)
+// If `relPath` == ”, do not append the slash (See #3664)
 func (f *Fs) readMetaDataForPathRelativeToID(ctx context.Context, normalizedID string, relPath string) (info *api.Item, resp *http.Response, err error) {
 	opts, _ := f.newOptsCallWithIDPath(normalizedID, relPath, true, "GET", "")
 
@@ -675,8 +744,7 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, path string) (info *api.It
 	firstSlashIndex := strings.IndexRune(path, '/')
 
 	if f.driveType != driveTypePersonal || firstSlashIndex == -1 {
-		var opts rest.Opts
-		opts = f.newOptsCallWithPath(ctx, path, "GET", "")
+		opts := f.newOptsCallWithPath(ctx, path, "GET", "")
 		opts.Path = strings.TrimSuffix(opts.Path, ":")
 		err = f.pacer.Call(func() (bool, error) {
 			resp, err = f.srv.CallJSON(ctx, &opts, nil, &info)
@@ -754,10 +822,10 @@ func errorHandler(resp *http.Response) error {
 func checkUploadChunkSize(cs fs.SizeSuffix) error {
 	const minChunkSize = fs.SizeSuffixBase
 	if cs%chunkSizeMultiple != 0 {
-		return errors.Errorf("%s is not a multiple of %s", cs, chunkSizeMultiple)
+		return fmt.Errorf("%s is not a multiple of %s", cs, chunkSizeMultiple)
 	}
 	if cs < minChunkSize {
-		return errors.Errorf("%s is less than %s", cs, minChunkSize)
+		return fmt.Errorf("%s is less than %s", cs, minChunkSize)
 	}
 	return nil
 }
@@ -781,7 +849,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 
 	err = checkUploadChunkSize(opt.ChunkSize)
 	if err != nil {
-		return nil, errors.Wrap(err, "onedrive: chunk size")
+		return nil, fmt.Errorf("onedrive: chunk size: %w", err)
 	}
 
 	if opt.DriveID == "" || opt.DriveType == "" {
@@ -789,6 +857,10 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 
 	rootURL := graphAPIEndpoint[opt.Region] + "/v1.0" + "/drives/" + opt.DriveID
+	oauthConfig.Scopes = opt.AccessScopes
+	if opt.DisableSitePermission {
+		oauthConfig.Scopes = scopeAccessWithoutSites
+	}
 	oauthConfig.Endpoint = oauth2.Endpoint{
 		AuthURL:  authEndpoint[opt.Region] + authPath,
 		TokenURL: authEndpoint[opt.Region] + tokenPath,
@@ -797,7 +869,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	root = parsePath(root)
 	oAuthClient, ts, err := oauthutil.NewClient(ctx, name, m, oauthConfig)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to configure OneDrive")
+		return nil, fmt.Errorf("failed to configure OneDrive: %w", err)
 	}
 
 	ci := fs.GetConfig(ctx)
@@ -826,12 +898,19 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	})
 
 	// Get rootID
-	rootInfo, _, err := f.readMetaDataForPath(ctx, "")
-	if err != nil || rootInfo.GetID() == "" {
-		return nil, errors.Wrap(err, "failed to get root")
+	var rootID = opt.RootFolderID
+	if rootID == "" {
+		rootInfo, _, err := f.readMetaDataForPath(ctx, "")
+		if err != nil {
+			return nil, fmt.Errorf("failed to get root: %w", err)
+		}
+		rootID = rootInfo.GetID()
+	}
+	if rootID == "" {
+		return nil, errors.New("failed to get root: ID was empty")
 	}
 
-	f.dirCache = dircache.New(root, rootInfo.GetID(), f)
+	f.dirCache = dircache.New(root, rootID, f)
 
 	// Find the current root
 	err = f.dirCache.FindRoot(ctx, false)
@@ -839,7 +918,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		// Assume it is a file
 		newRoot, remote := dircache.SplitPath(root)
 		tempF := *f
-		tempF.dirCache = dircache.New(newRoot, rootInfo.ID, &tempF)
+		tempF.dirCache = dircache.New(newRoot, rootID, &tempF)
 		tempF.root = newRoot
 		// Make new Fs which is the parent
 		err = tempF.dirCache.FindRoot(ctx, false)
@@ -971,7 +1050,7 @@ OUTER:
 			return shouldRetry(ctx, resp, err)
 		})
 		if err != nil {
-			return found, errors.Wrap(err, "couldn't list files")
+			return found, fmt.Errorf("couldn't list files: %w", err)
 		}
 		if len(result.Value) == 0 {
 			break
@@ -1058,7 +1137,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 // Creates from the parameters passed in a half finished Object which
 // must have setMetaData called on it
 //
-// Returns the object, leaf, directoryID and error
+// Returns the object, leaf, directoryID and error.
 //
 // Used to create new objects
 func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time, size int64) (o *Object, leaf string, directoryID string, err error) {
@@ -1077,7 +1156,7 @@ func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time,
 
 // Put the object into the container
 //
-// Copy the reader in to the new object which is returned
+// Copy the reader in to the new object which is returned.
 //
 // The new object may have been created if an error is returned
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
@@ -1175,7 +1254,7 @@ func (f *Fs) waitForJob(ctx context.Context, location string, o *Object) error {
 		var status api.AsyncOperationStatus
 		err = json.Unmarshal(body, &status)
 		if err != nil {
-			return errors.Wrapf(err, "async status result not JSON: %q", body)
+			return fmt.Errorf("async status result not JSON: %q: %w", body, err)
 		}
 
 		switch status.Status {
@@ -1185,22 +1264,25 @@ func (f *Fs) waitForJob(ctx context.Context, location string, o *Object) error {
 			}
 			fallthrough
 		case "deleteFailed":
-			return errors.Errorf("%s: async operation returned %q", o.remote, status.Status)
+			return fmt.Errorf("%s: async operation returned %q", o.remote, status.Status)
 		case "completed":
 			err = o.readMetaData(ctx)
-			return errors.Wrapf(err, "async operation completed but readMetaData failed")
+			if err != nil {
+				return fmt.Errorf("async operation completed but readMetaData failed: %w", err)
+			}
+			return nil
 		}
 
 		time.Sleep(1 * time.Second)
 	}
-	return errors.Errorf("async operation didn't complete after %v", f.ci.TimeoutOrInfinite())
+	return fmt.Errorf("async operation didn't complete after %v", f.ci.TimeoutOrInfinite())
 }
 
 // Copy src to this remote using server-side copy operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -1231,8 +1313,8 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	if srcObj.fs == f {
 		srcPath := srcObj.rootPath()
 		dstPath := f.rootPath(remote)
-		if strings.ToLower(srcPath) == strings.ToLower(dstPath) {
-			return nil, errors.Errorf("can't copy %q -> %q as are same name when lowercase", srcPath, dstPath)
+		if strings.EqualFold(srcPath, dstPath) {
+			return nil, fmt.Errorf("can't copy %q -> %q as are same name when lowercase", srcPath, dstPath)
 		}
 	}
 
@@ -1305,9 +1387,9 @@ func (f *Fs) Purge(ctx context.Context, dir string) error {
 
 // Move src to this remote using server-side move operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -1450,7 +1532,7 @@ func (f *Fs) About(ctx context.Context) (usage *fs.Usage, err error) {
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "about failed")
+		return nil, err
 	}
 	q := drive.Quota
 	// On (some?) Onedrive sharepoints these are all 0 so return unknown in that case
@@ -1500,7 +1582,9 @@ func (f *Fs) PublicLink(ctx context.Context, remote string, expire fs.Duration, 
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		fmt.Println(err)
+		if resp != nil && resp.StatusCode == 400 && f.driveType != driveTypePersonal {
+			return "", fmt.Errorf("%v (is making public links permitted by the org admin?)", err)
+		}
 		return "", err
 	}
 
@@ -1676,16 +1760,6 @@ func (o *Object) rootPath() string {
 	return o.fs.rootPath(o.remote)
 }
 
-// srvPath returns a path for use in server given a remote
-func (f *Fs) srvPath(remote string) string {
-	return f.opt.Enc.FromStandardPath(f.rootSlash() + remote)
-}
-
-// srvPath returns a path for use in server
-func (o *Object) srvPath() string {
-	return o.fs.srvPath(o.remote)
-}
-
 // Hash returns the SHA-1 of an object returning a lowercase hex string
 func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
 	if o.fs.driveType == driveTypePersonal {
@@ -1713,7 +1787,7 @@ func (o *Object) Size() int64 {
 // setMetaData sets the metadata from info
 func (o *Object) setMetaData(info *api.Item) (err error) {
 	if info.GetFolder() != nil {
-		return errors.Wrapf(fs.ErrorNotAFile, "%q", o.remote)
+		return fs.ErrorIsDir
 	}
 	o.hasMetaData = true
 	o.size = info.GetSize()
@@ -1768,7 +1842,6 @@ func (o *Object) readMetaData(ctx context.Context) (err error) {
 }
 
 // ModTime returns the modification time of the object
-//
 //
 // It attempts to read the objects mtime and if that isn't present the
 // LastModified returned in the http headers
@@ -1884,17 +1957,17 @@ func (o *Object) getPosition(ctx context.Context, url string) (pos int64, err er
 		return 0, err
 	}
 	if len(info.NextExpectedRanges) != 1 {
-		return 0, errors.Errorf("bad number of ranges in upload position: %v", info.NextExpectedRanges)
+		return 0, fmt.Errorf("bad number of ranges in upload position: %v", info.NextExpectedRanges)
 	}
 	position := info.NextExpectedRanges[0]
 	i := strings.IndexByte(position, '-')
 	if i < 0 {
-		return 0, errors.Errorf("no '-' in next expected range: %q", position)
+		return 0, fmt.Errorf("no '-' in next expected range: %q", position)
 	}
 	position = position[:i]
 	pos, err = strconv.ParseInt(position, 10, 64)
 	if err != nil {
-		return 0, errors.Wrapf(err, "bad expected range: %q", position)
+		return 0, fmt.Errorf("bad expected range: %q: %w", position, err)
 	}
 	return pos, nil
 }
@@ -1928,14 +2001,14 @@ func (o *Object) uploadFragment(ctx context.Context, url string, start int64, to
 			fs.Debugf(o, "Read position %d, chunk is %d..%d, bytes to skip = %d", pos, start, start+chunkSize, skip)
 			switch {
 			case skip < 0:
-				return false, errors.Wrapf(err, "sent block already (skip %d < 0), can't rewind", skip)
+				return false, fmt.Errorf("sent block already (skip %d < 0), can't rewind: %w", skip, err)
 			case skip > chunkSize:
-				return false, errors.Wrapf(err, "position is in the future (skip %d > chunkSize %d), can't skip forward", skip, chunkSize)
+				return false, fmt.Errorf("position is in the future (skip %d > chunkSize %d), can't skip forward: %w", skip, chunkSize, err)
 			case skip == chunkSize:
 				fs.Debugf(o, "Skipping chunk as already sent (skip %d == chunkSize %d)", skip, chunkSize)
 				return false, nil
 			}
-			return true, errors.Wrapf(err, "retry this chunk skipping %d bytes", skip)
+			return true, fmt.Errorf("retry this chunk skipping %d bytes: %w", skip, err)
 		}
 		if err != nil {
 			return shouldRetry(ctx, resp, err)
@@ -2110,7 +2183,7 @@ func (o *Object) ID() string {
  *       3. To avoid region-related issues, please don't manually build rest.Opts from scratch.
  *          Instead, use these helper function, and customize the URL afterwards if needed.
  *
- *       currently, the 21ViaNet's API differs in the following places:
+ *       currently, the Vnet Group's API differs in the following places:
  *       - https://{Endpoint}/drives/{driveID}/items/{leaf}:/{route}
  *           - this API doesn't work (gives invalid request)
  *           - can be replaced with the following API:
@@ -2127,7 +2200,7 @@ func (o *Object) ID() string {
 // Such a normalized ID can come from (*Item).GetID()
 func (f *Fs) parseNormalizedID(ID string) (string, string, string) {
 	rootURL := graphAPIEndpoint[f.opt.Region] + "/v1.0/drives"
-	if strings.Index(ID, "#") >= 0 {
+	if strings.Contains(ID, "#") {
 		s := strings.Split(ID, "#")
 		return s[1], s[0], rootURL
 	}
@@ -2159,7 +2232,7 @@ func escapeSingleQuote(str string) string {
 // newOptsCallWithIDPath build the rest.Opts structure with *a normalizedID (driveID#fileID, or simply fileID) and leaf*
 // using url template https://{Endpoint}/drives/{driveID}/items/{leaf}:/{route} (for international OneDrive)
 // or https://{Endpoint}/drives/{driveID}/items/children('{leaf}')/{route}
-// and https://{Endpoint}/drives/{driveID}/items/children('@a1')/{route}?@a1=URLEncode("'{leaf}'") (for 21ViaNet)
+// and https://{Endpoint}/drives/{driveID}/items/children('@a1')/{route}?@a1=URLEncode("'{leaf}'") (for Vnet Group)
 // if isPath is false, this function will only work when the leaf is "" or a child name (i.e. it doesn't accept multi-level leaf)
 // if isPath is true, multi-level leaf like a/b/c can be passed
 func (f *Fs) newOptsCallWithIDPath(normalizedID string, leaf string, isPath bool, method string, route string) (opts rest.Opts, ok bool) {
@@ -2246,6 +2319,148 @@ func (f *Fs) canonicalDriveID(driveID string) (canonicalDriveID string) {
 	}
 	canonicalDriveID = strings.ToLower(canonicalDriveID)
 	return canonicalDriveID
+}
+
+// ChangeNotify calls the passed function with a path that has had changes.
+// If the implementation uses polling, it should adhere to the given interval.
+//
+// Automatically restarts itself in case of unexpected behavior of the remote.
+//
+// Close the returned channel to stop being notified.
+//
+// The Onedrive implementation gives the whole hierarchy up to the  top when
+// an object is changed. For instance, if a/b/c is changed, this function
+// will call notifyFunc with a, a/b and a/b/c.
+func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryType), pollIntervalChan <-chan time.Duration) {
+	go func() {
+		// get the StartPageToken early so all changes from now on get processed
+		nextDeltaToken, err := f.changeNotifyStartPageToken(ctx)
+		if err != nil {
+			fs.Errorf(f, "Could not get first deltaLink: %s", err)
+			return
+		}
+
+		fs.Debugf(f, "Next delta token is: %s", nextDeltaToken)
+
+		var ticker *time.Ticker
+		var tickerC <-chan time.Time
+		for {
+			select {
+			case pollInterval, ok := <-pollIntervalChan:
+				if !ok {
+					if ticker != nil {
+						ticker.Stop()
+					}
+					return
+				}
+				if ticker != nil {
+					ticker.Stop()
+					ticker, tickerC = nil, nil
+				}
+				if pollInterval != 0 {
+					ticker = time.NewTicker(pollInterval)
+					tickerC = ticker.C
+				}
+			case <-tickerC:
+				fs.Debugf(f, "Checking for changes on remote")
+				nextDeltaToken, err = f.changeNotifyRunner(ctx, notifyFunc, nextDeltaToken)
+				if err != nil {
+					fs.Infof(f, "Change notify listener failure: %s", err)
+				}
+			}
+		}
+	}()
+}
+
+func (f *Fs) changeNotifyStartPageToken(ctx context.Context) (nextDeltaToken string, err error) {
+	delta, err := f.changeNotifyNextChange(ctx, "latest")
+	if err != nil {
+		return
+	}
+	parsedURL, err := url.Parse(delta.DeltaLink)
+	if err != nil {
+		return
+	}
+	nextDeltaToken = parsedURL.Query().Get("token")
+	return
+}
+
+func (f *Fs) changeNotifyNextChange(ctx context.Context, token string) (delta deltaResponse, err error) {
+	opts := f.buildDriveDeltaOpts(token)
+
+	_, err = f.srv.CallJSON(ctx, &opts, nil, &delta)
+
+	return
+}
+
+func (f *Fs) buildDriveDeltaOpts(token string) rest.Opts {
+	rootURL := graphAPIEndpoint[f.opt.Region] + "/v1.0/drives"
+
+	return rest.Opts{
+		Method:     "GET",
+		RootURL:    rootURL,
+		Path:       "/" + f.driveID + "/root/delta",
+		Parameters: map[string][]string{"token": {token}},
+	}
+}
+
+func (f *Fs) changeNotifyRunner(ctx context.Context, notifyFunc func(string, fs.EntryType), deltaToken string) (nextDeltaToken string, err error) {
+	delta, err := f.changeNotifyNextChange(ctx, deltaToken)
+	if err != nil {
+		return
+	}
+	parsedURL, err := url.Parse(delta.DeltaLink)
+	if err != nil {
+		return
+	}
+	nextDeltaToken = parsedURL.Query().Get("token")
+
+	for _, item := range delta.Value {
+		isDriveRootFolder := item.GetParentReference().ID == ""
+		if isDriveRootFolder {
+			continue
+		}
+
+		fullPath, err := getItemFullPath(&item)
+		if err != nil {
+			fs.Errorf(f, "Could not get item full path: %s", err)
+			continue
+		}
+
+		if fullPath == f.root {
+			continue
+		}
+
+		relName, insideRoot := getRelativePathInsideBase(f.root, fullPath)
+		if !insideRoot {
+			continue
+		}
+
+		if item.GetFile() != nil {
+			notifyFunc(relName, fs.EntryObject)
+		} else if item.GetFolder() != nil {
+			notifyFunc(relName, fs.EntryDirectory)
+		}
+	}
+
+	return
+}
+
+func getItemFullPath(item *api.Item) (fullPath string, err error) {
+	err = nil
+	fullPath = item.GetName()
+	if parent := item.GetParentReference(); parent != nil && parent.Path != "" {
+		pathParts := strings.SplitN(parent.Path, ":", 2)
+		if len(pathParts) != 2 {
+			err = fmt.Errorf("invalid parent path: %s", parent.Path)
+			return
+		}
+
+		if pathParts[1] != "" {
+			fullPath = strings.TrimPrefix(pathParts[1], "/") + "/" + fullPath
+		}
+	}
+	return
 }
 
 // getRelativePathInsideBase checks if `target` is inside `base`. If so, it

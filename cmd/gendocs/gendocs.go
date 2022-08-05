@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rclone/rclone/cmd"
+	"github.com/rclone/rclone/lib/file"
 	"github.com/spf13/cobra"
 	"github.com/spf13/cobra/doc"
 	"github.com/spf13/pflag"
@@ -55,7 +56,7 @@ rclone.org website.`,
 		// Create the directory structure
 		root := args[0]
 		out := filepath.Join(root, "commands")
-		err := os.MkdirAll(out, 0777)
+		err := file.MkdirAll(out, 0777)
 		if err != nil {
 			return err
 		}
@@ -78,7 +79,7 @@ rclone.org website.`,
 		var description = map[string]string{}
 		var addDescription func(root *cobra.Command)
 		addDescription = func(root *cobra.Command) {
-			name := strings.Replace(root.CommandPath(), " ", "_", -1) + ".md"
+			name := strings.ReplaceAll(root.CommandPath(), " ", "_") + ".md"
 			description[name] = root.Short
 			for _, c := range root.Commands() {
 				addDescription(c)
@@ -92,11 +93,11 @@ rclone.org website.`,
 			base := strings.TrimSuffix(name, path.Ext(name))
 			data := frontmatter{
 				Date:        now,
-				Title:       strings.Replace(base, "_", " ", -1),
+				Title:       strings.ReplaceAll(base, "_", " "),
 				Description: description[name],
 				Slug:        base,
 				URL:         "/commands/" + strings.ToLower(base) + "/",
-				Source:      strings.Replace(strings.Replace(base, "rclone", "cmd", -1), "_", "/", -1) + "/",
+				Source:      strings.ReplaceAll(strings.ReplaceAll(base, "rclone", "cmd"), "_", "/") + "/",
 			}
 			var buf bytes.Buffer
 			err := frontmatterTemplate.Execute(&buf, data)

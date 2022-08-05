@@ -6,19 +6,19 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/lib/readers"
 )
 
 // protocol errors
 var (
-	ErrorPrematureEOF  = errors.New("Premature EOF")
-	ErrorInvalidLength = errors.New("Invalid length")
-	ErrorZeroTerminate = errors.New("String must end with zero")
+	ErrorPrematureEOF  = errors.New("premature EOF")
+	ErrorInvalidLength = errors.New("invalid length")
+	ErrorZeroTerminate = errors.New("string must end with zero")
 )
 
 // BinWriter is a binary protocol writer

@@ -2,13 +2,14 @@ package vfs
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/log"
 	"github.com/rclone/rclone/fs/operations"
@@ -38,19 +39,19 @@ type File struct {
 	inode uint64 // inode number - read only
 	size  int64  // size of file - read and written with atomic int64 - must be 64 bit aligned
 
+	muRW sync.Mutex // synchronize RWFileHandle.openPending(), RWFileHandle.close() and File.Remove
+
 	mu               sync.RWMutex                    // protects the following
 	d                *Dir                            // parent directory
 	dPath            string                          // path of parent directory. NB dir rename means all Files are flushed
 	o                fs.Object                       // NB o may be nil if file is being written
 	leaf             string                          // leaf name of the object
 	writers          []Handle                        // writers for this file
-	nwriters         int32                           // len(writers) which is read/updated with atomic
 	pendingModTime   time.Time                       // will be applied once o becomes available, i.e. after file was written
 	pendingRenameFun func(ctx context.Context) error // will be run/renamed after all writers close
-	appendMode       bool                            // file was opened with O_APPEND
 	sys              atomic.Value                    // user defined info to be attached here
-
-	muRW sync.Mutex // synchronize RWFileHandle.openPending(), RWFileHandle.close() and File.Remove
+	nwriters         int32                           // len(writers) which is read/updated with atomic
+	appendMode       bool                            // file was opened with O_APPEND
 }
 
 // newFile creates a new File
@@ -166,7 +167,7 @@ func (f *File) rename(ctx context.Context, destDir *Dir, newName string) error {
 	f.mu.RUnlock()
 
 	if features := d.Fs().Features(); features.Move == nil && features.Copy == nil {
-		err := errors.Errorf("Fs %q can't rename files (no server-side Move or Copy)", d.Fs())
+		err := fmt.Errorf("Fs %q can't rename files (no server-side Move or Copy)", d.Fs())
 		fs.Errorf(f.Path(), "Dir.Rename error: %v", err)
 		return err
 	}
@@ -399,7 +400,7 @@ func (f *File) _applyPendingModTime() error {
 	defer func() { f.pendingModTime = time.Time{} }()
 
 	if f.o == nil {
-		return errors.New("Cannot apply ModTime, file object is not available")
+		return errors.New("cannot apply ModTime, file object is not available")
 	}
 
 	dt := f.pendingModTime.Sub(f.o.ModTime(context.Background()))
@@ -644,15 +645,15 @@ func (f *File) Fs() fs.Fs {
 
 // Open a file according to the flags provided
 //
-//   O_RDONLY open the file read-only.
-//   O_WRONLY open the file write-only.
-//   O_RDWR   open the file read-write.
+//	O_RDONLY open the file read-only.
+//	O_WRONLY open the file write-only.
+//	O_RDWR   open the file read-write.
 //
-//   O_APPEND append data to the file when writing.
-//   O_CREATE create a new file if none exists.
-//   O_EXCL   used with O_CREATE, file must not exist
-//   O_SYNC   open for synchronous I/O.
-//   O_TRUNC  if possible, truncate file when opened
+//	O_APPEND append data to the file when writing.
+//	O_CREATE create a new file if none exists.
+//	O_EXCL   used with O_CREATE, file must not exist
+//	O_SYNC   open for synchronous I/O.
+//	O_TRUNC  if possible, truncate file when opened
 //
 // We ignore O_SYNC and O_EXCL
 func (f *File) Open(flags int) (fd Handle, err error) {
@@ -744,20 +745,30 @@ func (f *File) Truncate(size int64) (err error) {
 	f.mu.Lock()
 	writers := make([]Handle, len(f.writers))
 	copy(writers, f.writers)
-	o := f.o
 	f.mu.Unlock()
-
-	// FIXME: handle closing writer
 
 	// If have writers then call truncate for each writer
 	if len(writers) != 0 {
+		var openWriters = len(writers)
 		fs.Debugf(f.Path(), "Truncating %d file handles", len(writers))
 		for _, h := range writers {
 			truncateErr := h.Truncate(size)
-			if truncateErr != nil {
+			if truncateErr == ECLOSED {
+				// Ignore ECLOSED since file handle can get closed while this is running
+				openWriters--
+			} else if truncateErr != nil {
 				err = truncateErr
 			}
 		}
+		// If at least one open writer return here
+		if openWriters > 0 {
+			return err
+		}
+	}
+
+	// if o is nil it isn't valid yet
+	o, err := f.waitForValidObject()
+	if err != nil {
 		return err
 	}
 

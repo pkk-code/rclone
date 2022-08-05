@@ -97,17 +97,21 @@ release_dep_linux:
 
 # Get the release dependencies we only install on Windows
 release_dep_windows:
-	GO111MODULE=off GOOS="" GOARCH="" go get github.com/josephspurrier/goversioninfo/cmd/goversioninfo
+	GOOS="" GOARCH="" go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
 
 # Update dependencies
 showupdates:
 	@echo "*** Direct dependencies that could be updated ***"
 	@GO111MODULE=on go list -u -f '{{if (and (not (or .Main .Indirect)) .Update)}}{{.Path}}: {{.Version}} -> {{.Update.Version}}{{end}}' -m all 2> /dev/null
 
+# Update direct dependencies only
+updatedirect:
+	GO111MODULE=on go get -d $$(go list -m -f '{{if not (or .Main .Indirect)}}{{.Path}}{{end}}' all)
+	GO111MODULE=on go mod tidy
+
 # Update direct and indirect dependencies and test dependencies
 update:
-	GO111MODULE=on go get -u -t ./...
-	-#GO111MODULE=on go get -d $(go list -m -f '{{if not (or .Main .Indirect)}}{{.Path}}{{end}}' all)
+	GO111MODULE=on go get -d -u -t ./...
 	GO111MODULE=on go mod tidy
 
 # Tidy the module dependencies
@@ -241,18 +245,48 @@ retag:
 startdev:
 	@echo "Version is $(VERSION)"
 	@echo "Next version is $(NEXT_VERSION)"
-	echo -e "package fs\n\n// Version of rclone\nvar Version = \"$(NEXT_VERSION)-DEV\"\n" | gofmt > fs/version.go
+	echo -e "package fs\n\n// VersionTag of rclone\nvar VersionTag = \"$(NEXT_VERSION)\"\n" | gofmt > fs/versiontag.go
 	echo -n "$(NEXT_VERSION)" > docs/layouts/partials/version.html
 	echo "$(NEXT_VERSION)" > VERSION
-	git commit -m "Start $(NEXT_VERSION)-DEV development" fs/version.go VERSION docs/layouts/partials/version.html
+	git commit -m "Start $(NEXT_VERSION)-DEV development" fs/versiontag.go VERSION docs/layouts/partials/version.html
 
 startstable:
 	@echo "Version is $(VERSION)"
 	@echo "Next stable version is $(NEXT_PATCH_VERSION)"
-	echo -e "package fs\n\n// Version of rclone\nvar Version = \"$(NEXT_PATCH_VERSION)-DEV\"\n" | gofmt > fs/version.go
+	echo -e "package fs\n\n// VersionTag of rclone\nvar VersionTag = \"$(NEXT_PATCH_VERSION)\"\n" | gofmt > fs/versiontag.go
 	echo -n "$(NEXT_PATCH_VERSION)" > docs/layouts/partials/version.html
 	echo "$(NEXT_PATCH_VERSION)" > VERSION
-	git commit -m "Start $(NEXT_PATCH_VERSION)-DEV development" fs/version.go VERSION docs/layouts/partials/version.html
+	git commit -m "Start $(NEXT_PATCH_VERSION)-DEV development" fs/versiontag.go VERSION docs/layouts/partials/version.html
 
 winzip:
 	zip -9 rclone-$(TAG).zip rclone.exe
+
+# docker volume plugin
+PLUGIN_USER ?= rclone
+PLUGIN_TAG ?= latest
+PLUGIN_BASE_TAG ?= latest
+PLUGIN_ARCH ?= amd64
+PLUGIN_IMAGE := $(PLUGIN_USER)/docker-volume-rclone:$(PLUGIN_TAG)
+PLUGIN_BASE := $(PLUGIN_USER)/rclone:$(PLUGIN_BASE_TAG)
+PLUGIN_BUILD_DIR := ./build/docker-plugin
+PLUGIN_CONTRIB_DIR := ./contrib/docker-plugin/managed
+
+docker-plugin-create:
+	docker buildx inspect |grep -q /${PLUGIN_ARCH} || \
+	docker run --rm --privileged tonistiigi/binfmt --install all
+	rm -rf ${PLUGIN_BUILD_DIR}
+	docker buildx build \
+		--no-cache --pull \
+		--build-arg BASE_IMAGE=${PLUGIN_BASE} \
+		--platform linux/${PLUGIN_ARCH} \
+		--output ${PLUGIN_BUILD_DIR}/rootfs \
+		${PLUGIN_CONTRIB_DIR}
+	cp ${PLUGIN_CONTRIB_DIR}/config.json ${PLUGIN_BUILD_DIR}
+	docker plugin rm --force ${PLUGIN_IMAGE} 2>/dev/null || true
+	docker plugin create ${PLUGIN_IMAGE} ${PLUGIN_BUILD_DIR}
+
+docker-plugin-push:
+	docker plugin push ${PLUGIN_IMAGE}
+	docker plugin rm ${PLUGIN_IMAGE}
+
+docker-plugin: docker-plugin-create docker-plugin-push

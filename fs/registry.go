@@ -10,8 +10,8 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/configstruct"
 )
@@ -37,11 +37,17 @@ type RegInfo struct {
 	Options Options
 	// The command help, if any
 	CommandHelp []CommandHelp
+	// Aliases - other names this backend is known by
+	Aliases []string
+	// Hide - if set don't show in the configurator
+	Hide bool
+	// MetadataInfo help about the metadata in use in this backend
+	MetadataInfo *MetadataInfo
 }
 
 // FileName returns the on disk file name for this backend
 func (ri *RegInfo) FileName() string {
-	return strings.Replace(ri.Name, " ", "", -1)
+	return strings.ReplaceAll(ri.Name, " ", "")
 }
 
 // Options is a slice of configuration Option for a backend
@@ -124,21 +130,30 @@ const (
 
 // Option is describes an option for the config wizard
 //
-// This also describes command line options and environment variables
+// This also describes command line options and environment variables.
+//
+// To create a multiple-choice option, specify the possible values
+// in the Examples property. Whether the option's value is required
+// to be one of these depends on other properties:
+//   - Default is to allow any value, either from specified examples,
+//     or any other value. To restrict exclusively to the specified
+//     examples, also set Exclusive=true.
+//   - If empty string should not be allowed then set Required=true,
+//     and do not set Default.
 type Option struct {
 	Name       string           // name of the option in snake_case
-	Help       string           // Help, the first line only is used for the command line help
-	Provider   string           // Set to filter on provider
-	Default    interface{}      // default value, nil => ""
+	Help       string           // help, start with a single sentence on a single line that will be extracted for command line help
+	Provider   string           // set to filter on provider
+	Default    interface{}      // default value, nil => "", if set (and not to nil or "") then Required does nothing
 	Value      interface{}      // value to be set by flags
-	Examples   OptionExamples   `json:",omitempty"` // config examples
+	Examples   OptionExamples   `json:",omitempty"` // predefined values that can be selected from list (multiple-choice option)
 	ShortOpt   string           // the short option for this if required
 	Hide       OptionVisibility // set this to hide the config from the configurator or the command line
-	Required   bool             // this option is required
+	Required   bool             // this option is required, meaning value cannot be empty unless there is a default
 	IsPassword bool             // set if the option is a password
 	NoPrefix   bool             // set if the option for this should not use the backend prefix
 	Advanced   bool             // set if this is an advanced config option
-	Exclusive  bool             // set if the answer can only be one of the examples
+	Exclusive  bool             // set if the answer can only be one of the examples (empty string allowed unless Required or Default is set)
 }
 
 // BaseOption is an alias for Option used internally
@@ -198,7 +213,7 @@ func (o *Option) Type() string {
 
 // FlagName for the option
 func (o *Option) FlagName(prefix string) string {
-	name := strings.Replace(o.Name, "_", "-", -1) // convert snake_case to kebab-case
+	name := strings.ReplaceAll(o.Name, "_", "-") // convert snake_case to kebab-case
 	if !o.NoPrefix {
 		name = prefix + "-" + name
 	}
@@ -248,6 +263,18 @@ func Register(info *RegInfo) {
 		info.Prefix = info.Name
 	}
 	Registry = append(Registry, info)
+	for _, alias := range info.Aliases {
+		// Copy the info block and rename and hide the alias and options
+		aliasInfo := *info
+		aliasInfo.Name = alias
+		aliasInfo.Prefix = alias
+		aliasInfo.Hide = true
+		aliasInfo.Options = append(Options(nil), info.Options...)
+		for i := range aliasInfo.Options {
+			aliasInfo.Options[i].Hide = OptionHideBoth
+		}
+		Registry = append(Registry, &aliasInfo)
+	}
 }
 
 // Find looks for a RegInfo object for the name passed in.  The name
@@ -260,12 +287,12 @@ func Find(name string) (*RegInfo, error) {
 			return item, nil
 		}
 	}
-	return nil, errors.Errorf("didn't find backend called %q", name)
+	return nil, fmt.Errorf("didn't find backend called %q", name)
 }
 
 // MustFind looks for an Info object for the type name passed in
 //
-// Services are looked up in the config file
+// Services are looked up in the config file.
 //
 // Exits with a fatal error if not found
 func MustFind(name string) *RegInfo {
@@ -274,4 +301,34 @@ func MustFind(name string) *RegInfo {
 		log.Fatalf("Failed to find remote: %v", err)
 	}
 	return fs
+}
+
+// Type returns a textual string to identify the type of the remote
+func Type(f Fs) string {
+	typeName := fmt.Sprintf("%T", f)
+	typeName = strings.TrimPrefix(typeName, "*")
+	typeName = strings.TrimSuffix(typeName, ".Fs")
+	return typeName
+}
+
+var (
+	typeToRegInfoMu sync.Mutex
+	typeToRegInfo   = map[string]*RegInfo{}
+)
+
+// Add the RegInfo to the reverse map
+func addReverse(f Fs, fsInfo *RegInfo) {
+	typeToRegInfoMu.Lock()
+	defer typeToRegInfoMu.Unlock()
+	typeToRegInfo[Type(f)] = fsInfo
+}
+
+// FindFromFs finds the *RegInfo used to create this Fs, provided
+// it was created by fs.NewFs or cache.Get
+//
+// It returns nil if not found
+func FindFromFs(f Fs) *RegInfo {
+	typeToRegInfoMu.Lock()
+	defer typeToRegInfoMu.Unlock()
+	return typeToRegInfo[Type(f)]
 }

@@ -2,13 +2,14 @@
 //
 // This uses the cgo based cgofuse library
 
+//go:build cmount && ((linux && cgo) || (darwin && cgo) || (freebsd && cgo) || windows)
 // +build cmount
-// +build cgo
-// +build linux darwin freebsd windows
+// +build linux,cgo darwin,cgo freebsd,cgo windows
 
 package cmount
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -16,13 +17,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/billziss-gh/cgofuse/fuse"
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/cmd/mountlib"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/lib/atexit"
 	"github.com/rclone/rclone/lib/buildinfo"
 	"github.com/rclone/rclone/vfs"
+	"github.com/winfsp/cgofuse/fuse"
 )
 
 func init() {
@@ -167,7 +167,7 @@ func mount(VFS *vfs.VFS, mountPath string, opt *mountlib.Options) (<-chan error,
 	host.SetCapCaseInsensitive(f.Features().CaseInsensitive)
 
 	// Create options
-	options := mountOptions(VFS, f.Name()+":"+f.Root(), mountpoint, opt)
+	options := mountOptions(VFS, opt.DeviceName, mountpoint, opt)
 	fs.Debugf(f, "Mounting with options: %q", options)
 
 	// Serve the mount point in the background returning error to errChan
@@ -175,7 +175,7 @@ func mount(VFS *vfs.VFS, mountPath string, opt *mountlib.Options) (<-chan error,
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				errChan <- errors.Errorf("mount failed: %v", r)
+				errChan <- fmt.Errorf("mount failed: %v", r)
 			}
 		}()
 		var err error
@@ -223,7 +223,7 @@ func mount(VFS *vfs.VFS, mountPath string, opt *mountlib.Options) (<-chan error,
 	// system didn't blow up before starting
 	select {
 	case err := <-errChan:
-		err = errors.Wrap(err, "mount stopped before calling Init")
+		err = fmt.Errorf("mount stopped before calling Init: %w", err)
 		return nil, nil, err
 	case <-fsys.ready:
 	}

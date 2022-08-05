@@ -53,6 +53,7 @@ func NewTransportCustom(ctx context.Context, customize func(*http.Transport)) ht
 	t.MaxIdleConns = 2 * t.MaxIdleConnsPerHost
 	t.TLSHandshakeTimeout = ci.ConnectTimeout
 	t.ResponseHeaderTimeout = ci.Timeout
+	t.DisableKeepAlives = ci.DisableHTTPKeepAlives
 
 	// TLS Config
 	t.TLSClientConfig = &tls.Config{
@@ -69,7 +70,6 @@ func NewTransportCustom(ctx context.Context, customize func(*http.Transport)) ht
 			log.Fatalf("Failed to load --client-cert/--client-key pair: %v", err)
 		}
 		t.TLSClientConfig.Certificates = []tls.Certificate{cert}
-		t.TLSClientConfig.BuildNameToCertificate()
 	}
 
 	// Load CA cert
@@ -136,12 +136,14 @@ func NewClient(ctx context.Context) *http.Client {
 // Transport is our http Transport which wraps an http.Transport
 // * Sets the User Agent
 // * Does logging
+// * Updates metrics
 type Transport struct {
 	*http.Transport
 	dump          fs.DumpFlags
 	filterRequest func(req *http.Request)
 	userAgent     string
 	headers       []*fs.HTTPOption
+	metrics       *Metrics
 }
 
 // newTransport wraps the http.Transport passed in and logs all
@@ -152,6 +154,7 @@ func newTransport(ci *fs.ConfigInfo, transport *http.Transport) *Transport {
 		dump:      ci.Dump,
 		userAgent: ci.UserAgent,
 		headers:   ci.Headers,
+		metrics:   DefaultMetrics,
 	}
 }
 
@@ -283,6 +286,9 @@ func (t *Transport) RoundTrip(req *http.Request) (resp *http.Response, err error
 		fs.Debugf(nil, "%s", separatorResp)
 		logMutex.Unlock()
 	}
+	// Update metrics
+	t.metrics.onResponse(req, resp)
+
 	if err == nil {
 		checkServerTime(req, resp)
 	}

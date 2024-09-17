@@ -1,9 +1,11 @@
 ---
 title: "Cache"
 description: "Rclone docs for cache remote"
+versionIntroduced: "v1.39"
+status: Deprecated
 ---
 
-# {{< icon "fa fa-archive" >}} Cache (DEPRECATED)
+# {{< icon "fa fa-archive" >}} Cache
 
 The `cache` remote wraps another existing remote and stores file structure
 and its data for long running tasks like `rclone mount`.
@@ -661,6 +663,17 @@ Properties:
 - Env Var:     RCLONE_CACHE_DB_WAIT_TIME
 - Type:        Duration
 - Default:     1s
+
+#### --cache-description
+
+Description of the remote.
+
+Properties:
+
+- Config:      description
+- Env Var:     RCLONE_CACHE_DESCRIPTION
+- Type:        string
+- Required:    false
 
 ## Backend commands
 

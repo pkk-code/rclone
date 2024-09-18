@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	sysdnotify "github.com/iguanesolutions/go-systemd/v5/notify"
 	"github.com/rclone/rclone/fs"
 	fscache "github.com/rclone/rclone/fs/cache"
 	"github.com/rclone/rclone/fs/config"
@@ -22,8 +21,10 @@ import (
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/fs/rc"
+	"github.com/rclone/rclone/lib/diskusage"
 	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/file"
+	"github.com/rclone/rclone/lib/systemd"
 	"github.com/rclone/rclone/vfs/vfscache/writeback"
 	"github.com/rclone/rclone/vfs/vfscommon"
 )
@@ -169,6 +170,18 @@ func (c *Cache) Stats() (out rc.Params) {
 	return out
 }
 
+// Queue returns info about the Cache
+func (c *Cache) Queue() (out rc.Params) {
+	out = make(rc.Params)
+	out["queue"] = c.writeback.Queue()
+	return out
+}
+
+// QueueSetExpiry updates the expiry of a single item in the upload queue
+func (c *Cache) QueueSetExpiry(id writeback.Handle, expiry time.Time) error {
+	return c.writeback.SetExpiry(id, expiry)
+}
+
 // createDir creates a directory path, along with any necessary parents
 func createDir(dir string) error {
 	return file.MkdirAll(dir, 0700)
@@ -211,7 +224,7 @@ func (c *Cache) createItemDir(name string) (string, error) {
 
 // getBackend gets a backend for a cache root dir
 func getBackend(ctx context.Context, parentPath string, name string, relativeDirPath string) (fs.Fs, error) {
-	path := fmt.Sprintf("%s/%s/%s", parentPath, name, relativeDirPath)
+	path := fmt.Sprintf(":local,encoding='%v':%s/%s/%s", encoder.OS, parentPath, name, relativeDirPath)
 	return fscache.Get(ctx, path)
 }
 
@@ -607,15 +620,16 @@ func (c *Cache) retryFailedResets() {
 	}
 }
 
-func (c *Cache) purgeClean(quota int64) {
+// Remove cache files that are not dirty until the quota is satisfied
+func (c *Cache) purgeClean() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	var items Items
-
-	if quota <= 0 || c.used < quota {
+	if c.quotasOK() {
 		return
 	}
+
+	var items Items
 
 	// Make a slice of clean cache files
 	for _, item := range c.item {
@@ -628,7 +642,7 @@ func (c *Cache) purgeClean(quota int64) {
 
 	// Reset items until the quota is OK
 	for _, item := range items {
-		if c.used < quota {
+		if c.quotasOK() {
 			break
 		}
 		resetResult, spaceFreed, err := item.Reset()
@@ -645,7 +659,7 @@ func (c *Cache) purgeClean(quota int64) {
 		}
 	}
 
-	// Resest outOfSpace without checking whether we have reduced cache space below the quota.
+	// Reset outOfSpace without checking whether we have reduced cache space below the quota.
 	// This allows some files to reduce their pendingAccesses count to allow them to be reset
 	// in the next iteration of the purge cleaner loop.
 
@@ -661,7 +675,7 @@ func (c *Cache) purgeOld(maxAge time.Duration) {
 	for _, item := range c.item {
 		c.removeNotInUse(item, maxAge, false)
 	}
-	if c.used < int64(c.opt.CacheMaxSize) {
+	if c.quotasOK() {
 		c.outOfSpace = false
 		c.cond.Broadcast()
 	}
@@ -693,16 +707,53 @@ func (c *Cache) updateUsed() (used int64) {
 	return newUsed
 }
 
+// Check the available space for a disk is in limits.
+func (c *Cache) minFreeSpaceQuotaOK() bool {
+	if c.opt.CacheMinFreeSpace <= 0 {
+		return true
+	}
+	du, err := diskusage.New(config.GetCacheDir())
+	if err == diskusage.ErrUnsupported {
+		return true
+	}
+	if err != nil {
+		fs.Errorf(nil, "disk usage returned error: %v", err)
+		return true
+	}
+	return du.Available >= uint64(c.opt.CacheMinFreeSpace)
+}
+
+// Check the available quota for a disk is in limits.
+//
+// must be called with mu held.
+func (c *Cache) maxSizeQuotaOK() bool {
+	if c.opt.CacheMaxSize <= 0 {
+		return true
+	}
+	return c.used <= int64(c.opt.CacheMaxSize)
+}
+
+// Check the available quotas for a disk is in limits.
+//
+// must be called with mu held.
+func (c *Cache) quotasOK() bool {
+	return c.maxSizeQuotaOK() && c.minFreeSpaceQuotaOK()
+}
+
+// Return true if any quotas set
+func (c *Cache) haveQuotas() bool {
+	return c.opt.CacheMaxSize > 0 || c.opt.CacheMinFreeSpace > 0
+}
+
 // Remove clean cache files that are not open until the total space
 // is reduced below quota starting from the oldest first
-func (c *Cache) purgeOverQuota(quota int64) {
+func (c *Cache) purgeOverQuota() {
 	c.updateUsed()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if quota <= 0 || c.used < quota {
-
+	if c.quotasOK() {
 		return
 	}
 
@@ -719,9 +770,9 @@ func (c *Cache) purgeOverQuota(quota int64) {
 
 	// Remove items until the quota is OK
 	for _, item := range items {
-		c.removeNotInUse(item, 0, c.used <= quota)
+		c.removeNotInUse(item, 0, c.quotasOK())
 	}
-	if c.used < quota {
+	if c.quotasOK() {
 		c.outOfSpace = false
 		c.cond.Broadcast()
 	}
@@ -740,22 +791,22 @@ func (c *Cache) clean(kicked bool) {
 	c.mu.Unlock()
 
 	// Remove any files that are over age
-	c.purgeOld(c.opt.CacheMaxAge)
+	c.purgeOld(time.Duration(c.opt.CacheMaxAge))
 
 	// If have a maximum cache size...
-	if int64(c.opt.CacheMaxSize) > 0 {
+	if c.haveQuotas() {
 		// Remove files not in use until cache size is below quota starting from the oldest first
-		c.purgeOverQuota(int64(c.opt.CacheMaxSize))
+		c.purgeOverQuota()
 
 		// Remove cache files that are not dirty if we are still above the max cache size
-		c.purgeClean(int64(c.opt.CacheMaxSize))
+		c.purgeClean()
 		c.retryFailedResets()
 	}
 
 	// Was kicked?
 	if kicked {
 		c.kickerMu.Lock() // Make sure this is called with cache mutex unlocked
-		// Reenable io threads to kick me
+		// Re-enable io threads to kick me
 		c.cleanerKicked = false
 		c.kickerMu.Unlock()
 	}
@@ -775,7 +826,7 @@ func (c *Cache) clean(kicked bool) {
 	stats := fmt.Sprintf("objects %d (was %d) in use %d, to upload %d, uploading %d, total size %v (was %v)",
 		newItems, oldItems, totalInUse, uploadsQueued, uploadsInProgress, newUsed, oldUsed)
 	fs.Infof(nil, "vfs cache: cleaned: %s", stats)
-	if err = sysdnotify.Status(fmt.Sprintf("[%s] vfs cache: %s", time.Now().Format("15:04"), stats)); err != nil {
+	if err = systemd.UpdateStatus(fmt.Sprintf("[%s] vfs cache: %s", time.Now().Format("15:04"), stats)); err != nil {
 		fs.Errorf(nil, "vfs cache: updating systemd status with current stats failed: %s", err)
 	}
 }
@@ -791,7 +842,7 @@ func (c *Cache) cleaner(ctx context.Context) {
 	// Start cleaning the cache immediately
 	c.clean(false)
 	// Then every interval specified
-	timer := time.NewTicker(c.opt.CachePollInterval)
+	timer := time.NewTicker(time.Duration(c.opt.CachePollInterval))
 	defer timer.Stop()
 	for {
 		select {

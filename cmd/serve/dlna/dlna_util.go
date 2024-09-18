@@ -3,18 +3,13 @@ package dlna
 import (
 	"crypto/md5"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"os"
-	"regexp"
-	"strconv"
-	"strings"
 
 	"github.com/anacrolix/dms/soap"
 	"github.com/anacrolix/dms/upnp"
@@ -35,7 +30,7 @@ func makeDefaultFriendlyName() string {
 func makeDeviceUUID(unique string) string {
 	h := md5.New()
 	if _, err := io.WriteString(h, unique); err != nil {
-		log.Panicf("makeDeviceUUID write failed: %s", err)
+		fs.Panicf(nil, "makeDeviceUUID write failed: %s", err)
 	}
 	buf := h.Sum(nil)
 	return upnp.FormatUUID(buf)
@@ -45,17 +40,21 @@ func makeDeviceUUID(unique string) string {
 func listInterfaces() []net.Interface {
 	ifs, err := net.Interfaces()
 	if err != nil {
-		log.Printf("list network interfaces: %v", err)
+		fs.Logf(nil, "list network interfaces: %v", err)
 		return []net.Interface{}
 	}
 
 	var active []net.Interface
 	for _, intf := range ifs {
-		if intf.Flags&net.FlagUp != 0 && intf.Flags&net.FlagMulticast != 0 && intf.MTU > 0 {
+		if isAppropriatelyConfigured(intf) {
 			active = append(active, intf)
 		}
 	}
 	return active
+}
+
+func isAppropriatelyConfigured(intf net.Interface) bool {
+	return intf.Flags&net.FlagUp != 0 && intf.Flags&net.FlagMulticast != 0 && intf.MTU > 0
 }
 
 func didlLite(chardata string) string {
@@ -71,7 +70,7 @@ func didlLite(chardata string) string {
 func mustMarshalXML(value interface{}) []byte {
 	ret, err := xml.MarshalIndent(value, "", "  ")
 	if err != nil {
-		log.Panicf("mustMarshalXML failed to marshal %v: %s", value, err)
+		fs.Panicf(nil, "mustMarshalXML failed to marshal %v: %s", value, err)
 	}
 	return ret
 }
@@ -87,36 +86,6 @@ func marshalSOAPResponse(sa upnp.SoapAction, args map[string]string) []byte {
 	}
 	return []byte(fmt.Sprintf(`<u:%[1]sResponse xmlns:u="%[2]s">%[3]s</u:%[1]sResponse>`,
 		sa.Action, sa.ServiceURN.String(), mustMarshalXML(soapArgs)))
-}
-
-var serviceURNRegexp = regexp.MustCompile(`:service:(\w+):(\d+)$`)
-
-func parseServiceType(s string) (ret upnp.ServiceURN, err error) {
-	matches := serviceURNRegexp.FindStringSubmatch(s)
-	if matches == nil {
-		err = errors.New(s)
-		return
-	}
-	if len(matches) != 3 {
-		log.Panicf("Invalid serviceURNRegexp ?")
-	}
-	ret.Type = matches[1]
-	ret.Version, err = strconv.ParseUint(matches[2], 0, 0)
-	return
-}
-
-func parseActionHTTPHeader(s string) (ret upnp.SoapAction, err error) {
-	if s[0] != '"' || s[len(s)-1] != '"' {
-		return
-	}
-	s = s[1 : len(s)-1]
-	hashIndex := strings.LastIndex(s, "#")
-	if hashIndex == -1 {
-		return
-	}
-	ret.Action = s[hashIndex+1:]
-	ret.ServiceURN, err = parseServiceType(s[:hashIndex])
-	return
 }
 
 type loggingResponseWriter struct {

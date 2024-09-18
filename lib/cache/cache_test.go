@@ -81,6 +81,22 @@ func TestGetError(t *testing.T) {
 	assert.Equal(t, 0, len(c.cache))
 }
 
+func TestPutErr(t *testing.T) {
+	c, create := setup(t)
+
+	assert.Equal(t, 0, len(c.cache))
+
+	c.PutErr("/alien", "slime", errSentinel)
+
+	assert.Equal(t, 1, len(c.cache))
+
+	fNew, err := c.Get("/alien", create)
+	require.Equal(t, errSentinel, err)
+	require.Equal(t, "slime", fNew)
+
+	assert.Equal(t, 1, len(c.cache))
+}
+
 func TestPut(t *testing.T) {
 	c, create := setup(t)
 
@@ -158,7 +174,7 @@ func TestCachePin(t *testing.T) {
 	_, err := c.Get("/", create)
 	require.NoError(t, err)
 
-	// Pin a non-existent item to show nothing happens
+	// Pin a nonexistent item to show nothing happens
 	c.Pin("notfound")
 
 	c.mu.Lock()
@@ -312,7 +328,7 @@ func TestCacheRename(t *testing.T) {
 
 	assert.Equal(t, 2, c.Entries())
 
-	// rename to non-existent
+	// rename to nonexistent
 	value, found := c.Rename("existing1", "EXISTING1")
 	assert.Equal(t, true, found)
 	assert.Equal(t, existing1, value)
@@ -326,7 +342,7 @@ func TestCacheRename(t *testing.T) {
 
 	assert.Equal(t, 1, c.Entries())
 
-	// rename non-existent
+	// rename nonexistent
 	value, found = c.Rename("notfound", "NOTFOUND")
 	assert.Equal(t, false, found)
 	assert.Nil(t, value)

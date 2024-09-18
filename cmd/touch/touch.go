@@ -1,3 +1,4 @@
+// Package touch provides the touch command.
 package touch
 
 import (
@@ -5,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/rclone/rclone/cmd"
@@ -33,17 +33,16 @@ const (
 func init() {
 	cmd.Root.AddCommand(commandDefinition)
 	cmdFlags := commandDefinition.Flags()
-	flags.BoolVarP(cmdFlags, &notCreateNewFile, "no-create", "C", false, "Do not create the file if it does not exist (implied with --recursive)")
-	flags.StringVarP(cmdFlags, &timeAsArgument, "timestamp", "t", "", "Use specified time instead of the current time of day")
-	flags.BoolVarP(cmdFlags, &localTime, "localtime", "", false, "Use localtime for timestamp, not UTC")
-	flags.BoolVarP(cmdFlags, &recursive, "recursive", "R", false, "Recursively touch all files")
+	flags.BoolVarP(cmdFlags, &notCreateNewFile, "no-create", "C", false, "Do not create the file if it does not exist (implied with --recursive)", "")
+	flags.StringVarP(cmdFlags, &timeAsArgument, "timestamp", "t", "", "Use specified time instead of the current time of day", "")
+	flags.BoolVarP(cmdFlags, &localTime, "localtime", "", false, "Use localtime for timestamp, not UTC", "")
+	flags.BoolVarP(cmdFlags, &recursive, "recursive", "R", false, "Recursively touch all files", "")
 }
 
 var commandDefinition = &cobra.Command{
 	Use:   "touch remote:path",
 	Short: `Create new file or change file modification time.`,
-	Long: `
-Set the modification time on file(s) as specified by remote:path to
+	Long: `Set the modification time on file(s) as specified by remote:path to
 have the current time.
 
 If remote:path does not exist then a zero sized file will be created,
@@ -51,7 +50,7 @@ unless ` + "`--no-create`" + ` or ` + "`--recursive`" + ` is provided.
 
 If ` + "`--recursive`" + ` is used then recursively sets the modification
 time on all existing files that is found under the path. Filters are supported,
-and you can test with the ` + "`--dry-run`" + ` or the ` + "`--interactive`" + ` flag.
+and you can test with the ` + "`--dry-run`" + ` or the ` + "`--interactive`/`-i`" + ` flag.
 
 If ` + "`--timestamp`" + ` is used then sets the modification time to that
 time instead of the current time. Times may be specified as one of:
@@ -63,6 +62,10 @@ time instead of the current time. Times may be specified as one of:
 Note that value of ` + "`--timestamp`" + ` is in UTC. If you want local time
 then add the ` + "`--localtime`" + ` flag.
 `,
+	Annotations: map[string]string{
+		"versionIntroduced": "v1.39",
+		"groups":            "Filter,Listing,Important",
+	},
 	Run: func(command *cobra.Command, args []string) {
 		cmd.CheckArgs(1, 1, command, args)
 		f, remote := newFsDst(args)
@@ -82,7 +85,7 @@ then add the ` + "`--localtime`" + ` flag.
 func newFsDst(args []string) (f fs.Fs, remote string) {
 	root, remote, err := fspath.Split(args[0])
 	if err != nil {
-		log.Fatalf("Parsing %q failed: %v", args[0], err)
+		fs.Fatalf(nil, "Parsing %q failed: %v", args[0], err)
 	}
 	if root == "" {
 		root = "."
@@ -134,21 +137,26 @@ func Touch(ctx context.Context, f fs.Fs, remote string) error {
 		return err
 	}
 	fs.Debugf(nil, "Touch time %v", t)
-	file, err := f.NewObject(ctx, remote)
+	var file fs.Object
+	if remote == "" {
+		err = fs.ErrorIsDir
+	} else {
+		file, err = f.NewObject(ctx, remote)
+	}
 	if err != nil {
 		if errors.Is(err, fs.ErrorObjectNotFound) {
-			// Touching non-existant path, possibly creating it as new file
+			// Touching non-existent path, possibly creating it as new file
 			if remote == "" {
 				fs.Logf(f, "Not touching empty directory")
 				return nil
 			}
 			if notCreateNewFile {
-				fs.Logf(f, "Not touching non-existent file due to --no-create")
+				fs.Logf(f, "Not touching nonexistent file due to --no-create")
 				return nil
 			}
 			if recursive {
 				// For consistency, --recursive never creates new files.
-				fs.Logf(f, "Not touching non-existent file due to --recursive")
+				fs.Logf(f, "Not touching nonexistent file due to --recursive")
 				return nil
 			}
 			if operations.SkipDestructive(ctx, f, "touch (create)") {

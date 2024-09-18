@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime"
 	"os"
 	"path"
@@ -78,7 +77,7 @@ var additionalMimeTypes = map[string]string{
 // Load the example export formats into exportFormats for testing
 func TestInternalLoadExampleFormats(t *testing.T) {
 	fetchFormatsOnce.Do(func() {})
-	buf, err := ioutil.ReadFile(filepath.FromSlash("test/about.json"))
+	buf, err := os.ReadFile(filepath.FromSlash("test/about.json"))
 	var about struct {
 		ExportFormats map[string][]string `json:"exportFormats,omitempty"`
 		ImportFormats map[string][]string `json:"importFormats,omitempty"`
@@ -244,6 +243,15 @@ func (f *Fs) InternalTestShouldRetry(t *testing.T) {
 	quotaExceededRetry, quotaExceededError := f.shouldRetry(ctx, &generic403)
 	assert.False(t, quotaExceededRetry)
 	assert.Equal(t, quotaExceededError, expectedQuotaError)
+
+	sqEItem := googleapi.ErrorItem{
+		Reason: "storageQuotaExceeded",
+	}
+	generic403.Errors[0] = sqEItem
+	expectedStorageQuotaError := fserrors.FatalError(&generic403)
+	storageQuotaExceededRetry, storageQuotaExceededError := f.shouldRetry(ctx, &generic403)
+	assert.False(t, storageQuotaExceededRetry)
+	assert.Equal(t, storageQuotaExceededError, expectedStorageQuotaError)
 }
 
 func (f *Fs) InternalTestDocumentImport(t *testing.T) {
@@ -516,9 +524,49 @@ func (f *Fs) InternalTestCopyID(t *testing.T) {
 	})
 }
 
+// TestIntegration/FsMkdir/FsPutFiles/Internal/Query
+func (f *Fs) InternalTestQuery(t *testing.T) {
+	ctx := context.Background()
+	var err error
+	t.Run("BadQuery", func(t *testing.T) {
+		_, err = f.query(ctx, "this is a bad query")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to execute query")
+	})
+
+	t.Run("NoMatch", func(t *testing.T) {
+		results, err := f.query(ctx, fmt.Sprintf("name='%s' and name!='%s'", existingSubDir, existingSubDir))
+		require.NoError(t, err)
+		assert.Len(t, results, 0)
+	})
+
+	t.Run("GoodQuery", func(t *testing.T) {
+		pathSegments := strings.Split(existingFile, "/")
+		var parent string
+		for _, item := range pathSegments {
+			// the file name contains ' characters which must be escaped
+			escapedItem := f.opt.Enc.FromStandardName(item)
+			escapedItem = strings.ReplaceAll(escapedItem, `\`, `\\`)
+			escapedItem = strings.ReplaceAll(escapedItem, `'`, `\'`)
+
+			results, err := f.query(ctx, fmt.Sprintf("%strashed=false and name='%s'", parent, escapedItem))
+			require.NoError(t, err)
+			require.True(t, len(results) > 0)
+			for _, result := range results {
+				assert.True(t, len(result.Id) > 0)
+				assert.Equal(t, result.Name, item)
+			}
+			parent = fmt.Sprintf("'%s' in parents and ", results[0].Id)
+		}
+	})
+}
+
 // TestIntegration/FsMkdir/FsPutFiles/Internal/AgeQuery
 func (f *Fs) InternalTestAgeQuery(t *testing.T) {
-	opt := &filter.Opt{}
+	// Check set up for filtering
+	assert.True(t, f.Features().FilterAware)
+
+	opt := &filter.Options{}
 	err := opt.MaxAge.Set("1h")
 	assert.NoError(t, err)
 	flt, err := filter.NewFilter(opt)
@@ -600,6 +648,7 @@ func (f *Fs) InternalTest(t *testing.T) {
 	t.Run("Shortcuts", f.InternalTestShortcuts)
 	t.Run("UnTrash", f.InternalTestUnTrash)
 	t.Run("CopyID", f.InternalTestCopyID)
+	t.Run("Query", f.InternalTestQuery)
 	t.Run("AgeQuery", f.InternalTestAgeQuery)
 	t.Run("ShouldRetry", f.InternalTestShouldRetry)
 }

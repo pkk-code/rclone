@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"path"
 	"strings"
 	"sync"
@@ -39,8 +38,7 @@ func init() {
 }
 
 // Options defines the configuration for this backend
-type Options struct {
-}
+type Options struct{}
 
 // Fs represents a remote memory server
 type Fs struct {
@@ -298,7 +296,7 @@ func (f *Fs) list(ctx context.Context, bucket, directory, prefix string, addBuck
 				slash := strings.IndexRune(localPath, '/')
 				if slash >= 0 {
 					// send a directory if have a slash
-					dir := directory + localPath[:slash]
+					dir := strings.TrimPrefix(directory, f.rootDirectory+"/") + localPath[:slash]
 					if addBucket {
 						dir = path.Join(bucket, dir)
 					}
@@ -386,10 +384,22 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (err error) {
 	bucket, directory := f.split(dir)
 	list := walk.NewListRHelper(callback)
+	entries := fs.DirEntries{}
 	listR := func(bucket, directory, prefix string, addBucket bool) error {
-		return f.list(ctx, bucket, directory, prefix, addBucket, true, func(remote string, entry fs.DirEntry, isDirectory bool) error {
-			return list.Add(entry)
+		err = f.list(ctx, bucket, directory, prefix, addBucket, true, func(remote string, entry fs.DirEntry, isDirectory bool) error {
+			entries = append(entries, entry) // can't list.Add here -- could deadlock
+			return nil
 		})
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			err = list.Add(entry)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	if bucket == "" {
 		entries, err := f.listBuckets(ctx)
@@ -483,7 +493,8 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	if od == nil {
 		return nil, fs.ErrorObjectNotFound
 	}
-	buckets.updateObjectData(dstBucket, dstPath, od)
+	odCopy := *od
+	buckets.updateObjectData(dstBucket, dstPath, &odCopy)
 	return f.NewObject(ctx, remote)
 }
 
@@ -575,7 +586,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		}
 		data = data[:limit]
 	}
-	return ioutil.NopCloser(bytes.NewBuffer(data)), nil
+	return io.NopCloser(bytes.NewBuffer(data)), nil
 }
 
 // Update the object with the contents of the io.Reader, modTime and size
@@ -583,7 +594,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 // The new object may have been created if an error is returned
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
 	bucket, bucketPath := o.split()
-	data, err := ioutil.ReadAll(in)
+	data, err := io.ReadAll(in)
 	if err != nil {
 		return fmt.Errorf("failed to update memory object: %w", err)
 	}

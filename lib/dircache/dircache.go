@@ -48,7 +48,7 @@ type DirCacher interface {
 // error. This isn't done at initialization as it isn't known whether
 // the root and intermediate directories need to be created or not.
 //
-// Most of the utility functions wil call FindRoot() on the caller's
+// Most of the utility functions will call FindRoot() on the caller's
 // behalf with the create flag passed in.
 //
 // The cache is safe for concurrent use
@@ -140,7 +140,7 @@ func (dc *DirCache) SetRootIDAlias(rootID string) {
 	dc.Put("", dc.rootID)
 }
 
-// FlushDir flushes the map of all data starting with with the path
+// FlushDir flushes the map of all data starting with the path
 // dir.
 //
 // If dir is empty string then this is equivalent to calling ResetRoot
@@ -358,10 +358,8 @@ func (dc *DirCache) RootParentID(ctx context.Context, create bool) (ID string, e
 			return "", err
 		}
 		dc.rootParentID = rootParentID
-	} else {
-		if dc.rootID == dc.trueRootID {
-			return "", errors.New("is root directory")
-		}
+	} else if dc.rootID == dc.trueRootID {
+		return "", errors.New("is root directory")
 	}
 	if dc.rootParentID == "" {
 		return "", errors.New("internal error: didn't find rootParentID")

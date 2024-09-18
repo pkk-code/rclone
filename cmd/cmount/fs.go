@@ -1,6 +1,4 @@
 //go:build cmount && ((linux && cgo) || (darwin && cgo) || (freebsd && cgo) || windows)
-// +build cmount
-// +build linux,cgo darwin,cgo freebsd,cgo windows
 
 package cmount
 
@@ -8,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,17 +25,19 @@ const fhUnset = ^uint64(0)
 type FS struct {
 	VFS       *vfs.VFS
 	f         fs.Fs
+	opt       *mountlib.Options
 	ready     chan (struct{})
 	mu        sync.Mutex // to protect the below
 	handles   []vfs.Handle
-	destroyed int32 // read/write with sync/atomic
+	destroyed atomic.Int32
 }
 
 // NewFS makes a new FS
-func NewFS(VFS *vfs.VFS) *FS {
+func NewFS(VFS *vfs.VFS, opt *mountlib.Options) *FS {
 	fsys := &FS{
 		VFS:   VFS,
 		f:     VFS.Fs(),
+		opt:   opt,
 		ready: make(chan (struct{})),
 	}
 	return fsys
@@ -189,7 +190,7 @@ func (fsys *FS) Init() {
 // Destroy call).
 func (fsys *FS) Destroy() {
 	defer log.Trace(fsys.f, "")("")
-	atomic.StoreInt32(&fsys.destroyed, 1)
+	fsys.destroyed.Store(1)
 }
 
 // Getattr reads the attributes for path
@@ -306,6 +307,9 @@ func (fsys *FS) OpenEx(path string, fi *fuse.FileInfo_t) (errc int) {
 
 	// If size unknown then use direct io to read
 	if entry := handle.Node().DirEntry(); entry != nil && entry.Size() < 0 {
+		fi.DirectIo = true
+	}
+	if fsys.opt.DirectIO {
 		fi.DirectIo = true
 	}
 
@@ -567,6 +571,21 @@ func (fsys *FS) Listxattr(path string, fill func(name string) bool) (errc int) {
 	return -fuse.ENOSYS
 }
 
+// Getpath allows a case-insensitive file system to report the correct case of
+// a file path.
+func (fsys *FS) Getpath(path string, fh uint64) (errc int, normalisedPath string) {
+	defer log.Trace(path, "Getpath fh=%d", fh)("errc=%d, normalisedPath=%q", &errc, &normalisedPath)
+	node, _, errc := fsys.getNode(path, fh)
+	if errc != 0 {
+		return errc, ""
+	}
+	normalisedPath = node.Path()
+	if !strings.HasPrefix("/", normalisedPath) {
+		normalisedPath = "/" + normalisedPath
+	}
+	return 0, normalisedPath
+}
+
 // Translate errors from mountlib
 func translateError(err error) (errc int) {
 	if err == nil {
@@ -631,6 +650,7 @@ func translateOpenFlags(inFlags int) (outFlags int) {
 var (
 	_ fuse.FileSystemInterface = (*FS)(nil)
 	_ fuse.FileSystemOpenEx    = (*FS)(nil)
+	_ fuse.FileSystemGetpath   = (*FS)(nil)
 	//_ fuse.FileSystemChflags    = (*FS)(nil)
 	//_ fuse.FileSystemSetcrtime  = (*FS)(nil)
 	//_ fuse.FileSystemSetchgtime = (*FS)(nil)

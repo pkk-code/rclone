@@ -1,5 +1,4 @@
 //go:build !plan9 && !js
-// +build !plan9,!js
 
 package cache
 
@@ -9,7 +8,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"strconv"
@@ -473,7 +471,7 @@ func (b *Persistent) GetChunk(cachedObject *Object, offset int64) ([]byte, error
 	var data []byte
 
 	fp := path.Join(b.dataPath, cachedObject.abs(), strconv.FormatInt(offset, 10))
-	data, err := ioutil.ReadFile(fp)
+	data, err := os.ReadFile(fp)
 	if err != nil {
 		return nil, err
 	}
@@ -486,7 +484,7 @@ func (b *Persistent) AddChunk(fp string, data []byte, offset int64) error {
 	_ = os.MkdirAll(path.Join(b.dataPath, fp), os.ModePerm)
 
 	filePath := path.Join(b.dataPath, fp, strconv.FormatInt(offset, 10))
-	err := ioutil.WriteFile(filePath, data, os.ModePerm)
+	err := os.WriteFile(filePath, data, os.ModePerm)
 	if err != nil {
 		return err
 	}

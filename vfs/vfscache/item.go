@@ -172,13 +172,6 @@ func (item *Item) inUse() bool {
 	return item.opens != 0 || item.info.Dirty
 }
 
-// getATime returns the ATime of the item
-func (item *Item) getATime() time.Time {
-	item.mu.Lock()
-	defer item.mu.Unlock()
-	return item.info.ATime
-}
-
 // getDiskSize returns the size on disk (approximately) of the item
 //
 // We return the sizes of the chunks we have fetched, however there is
@@ -272,11 +265,25 @@ func (item *Item) _truncate(size int64) (err error) {
 		}
 	}
 
-	fs.Debugf(item.name, "vfs cache: truncate to size=%d", size)
+	// Check to see what the current size is, and don't truncate
+	// if it is already the correct size.
+	//
+	// Apparently Windows Defender likes to check executables each
+	// time they are modified, and truncating a file to its
+	// existing size is enough to trigger the Windows Defender
+	// scan. This was causing a big slowdown for operations which
+	// opened and closed the file a lot, such as looking at
+	// properties on an executable.
+	fi, err := fd.Stat()
+	if err == nil && fi.Size() == size {
+		fs.Debugf(item.name, "vfs cache: truncate to size=%d (not needed as size correct)", size)
+	} else {
+		fs.Debugf(item.name, "vfs cache: truncate to size=%d", size)
 
-	err = fd.Truncate(size)
-	if err != nil {
-		return fmt.Errorf("vfs cache: truncate: %w", err)
+		err = fd.Truncate(size)
+		if err != nil {
+			return fmt.Errorf("vfs cache: truncate: %w", err)
+		}
 	}
 
 	item.info.Size = size
@@ -460,7 +467,9 @@ func (item *Item) _createFile(osPath string) (err error) {
 		return errors.New("vfs cache item: internal error: didn't Close file")
 	}
 	item.modified = false
+	// t0 := time.Now()
 	fd, err := file.OpenFile(osPath, os.O_RDWR, 0600)
+	// fs.Debugf(item.name, "OpenFile took %v", time.Since(t0))
 	if err != nil {
 		return fmt.Errorf("vfs cache item: open failed: %w", err)
 	}
@@ -564,6 +573,15 @@ func (item *Item) open(o fs.Object) (err error) {
 	return err
 }
 
+// Calls f with mu unlocked, re-locking mu if a panic is raised
+//
+// mu must be locked when calling this function
+func unlockMutexForCall(mu *sync.Mutex, f func()) {
+	mu.Unlock()
+	defer mu.Lock()
+	f()
+}
+
 // Store stores the local cache file to the remote object, returning
 // the new remote object. objOld is the old object if known.
 //
@@ -580,30 +598,39 @@ func (item *Item) _store(ctx context.Context, storeFn StoreFn) (err error) {
 	// Object has disappeared if cacheObj == nil
 	if cacheObj != nil {
 		o, name := item.o, item.name
-		item.mu.Unlock()
-		o, err := operations.Copy(ctx, item.c.fremote, o, name, cacheObj)
-		item.mu.Lock()
+		unlockMutexForCall(&item.mu, func() {
+			o, err = operations.Copy(ctx, item.c.fremote, o, name, cacheObj)
+		})
 		if err != nil {
+			if errors.Is(err, fs.ErrorCantUploadEmptyFiles) {
+				fs.Errorf(name, "Writeback failed: %v", err)
+				return nil
+			}
 			return fmt.Errorf("vfs cache: failed to transfer file from cache to remote: %w", err)
 		}
 		item.o = o
 		item._updateFingerprint()
 	}
 
-	item.info.Dirty = false
-	err = item._save()
-	if err != nil {
-		fs.Errorf(item.name, "vfs cache: failed to write metadata file: %v", err)
-	}
+	// Write the object back to the VFS layer before we mark it as
+	// clean, otherwise it will become eligible for removal which
+	// can cause a deadlock
 	if storeFn != nil && item.o != nil {
 		fs.Debugf(item.name, "vfs cache: writeback object to VFS layer")
-		// Write the object back to the VFS layer as last
-		// thing we do with mutex unlocked
+		// Write the object back to the VFS layer last with mutex unlocked
 		o := item.o
 		item.mu.Unlock()
 		storeFn(o)
 		item.mu.Lock()
 	}
+
+	// Show item is clean and is eligible for cache removal
+	item.info.Dirty = false
+	err = item._save()
+	if err != nil {
+		fs.Errorf(item.name, "vfs cache: failed to write metadata file: %v", err)
+	}
+
 	return nil
 }
 
@@ -710,7 +737,7 @@ func (item *Item) Close(storeFn StoreFn) (err error) {
 			item.c.writeback.SetID(&item.writeBackID)
 			id := item.writeBackID
 			item.mu.Unlock()
-			item.c.writeback.Add(id, item.name, item.modified, func(ctx context.Context) error {
+			item.c.writeback.Add(id, item.name, item.info.Size, item.modified, func(ctx context.Context) error {
 				return item.store(ctx, storeFn)
 			})
 			item.mu.Lock()
@@ -792,6 +819,7 @@ func (item *Item) _checkObject(o fs.Object) error {
 				if !item.info.Dirty {
 					fs.Debugf(item.name, "vfs cache: removing cached entry as stale (remote fingerprint %q != cached fingerprint %q)", remoteFingerprint, item.info.Fingerprint)
 					item._remove("stale (remote is different)")
+					item.info.Fingerprint = remoteFingerprint
 				} else {
 					fs.Debugf(item.name, "vfs cache: remote object has changed but local object modified - keeping it (remote fingerprint %q != cached fingerprint %q)", remoteFingerprint, item.info.Fingerprint)
 				}
@@ -945,7 +973,7 @@ func (item *Item) Reset() (rr ResetResult, spaceFreed int64, err error) {
 	}
 
 	/* Do not need to reset an empty cache file unless it was being reset and the reset failed.
-	   Some thread(s) may be waiting on the reset's succesful completion in that case. */
+	   Some thread(s) may be waiting on the reset's successful completion in that case. */
 	if item.info.Rs.Size() == 0 && !item.beingReset {
 		return SkippedEmpty, 0, nil
 	}
@@ -1152,7 +1180,7 @@ func (item *Item) _ensure(offset, size int64) (err error) {
 // This is called by the downloader downloading file segments and the
 // vfs layer writing to the file.
 //
-// This doesn't mark the item as Dirty - that the the responsibility
+// This doesn't mark the item as Dirty - that the responsibility
 // of the caller as we don't know here whether we are adding reads or
 // writes to the cache file.
 //
@@ -1258,6 +1286,15 @@ func (item *Item) readAt(b []byte, off int64) (n int, err error) {
 	err = item._ensure(off, int64(len(b)))
 	if err != nil {
 		return 0, err
+	}
+
+	// Check to see if object has shrunk - if so don't read too much.
+	if item.o != nil && !item.info.Dirty && item.o.Size() != item.info.Size {
+		fs.Debugf(item.o, "Size has changed from %d to %d", item.info.Size, item.o.Size())
+		err = item._truncate(item.o.Size())
+		if err != nil {
+			return 0, err
+		}
 	}
 
 	item.info.ATime = time.Now()

@@ -307,7 +307,6 @@ func (c *copy) copy(ctx context.Context) (newDst fs.Object, err error) {
 
 		// If can't server-side copy, do it manually
 		if errors.Is(err, fs.ErrorCantCopy) {
-			fs.Debugf(c.src, "PK Manual Copy")
 			actionTaken, newDst, err = c.manualCopy(ctx)
 		}
 

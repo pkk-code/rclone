@@ -13,7 +13,7 @@ const (
 	timeFormat = `"` + time.RFC1123Z + `"`
 )
 
-// Time represents represents date and time information for the
+// Time represents date and time information for the
 // pcloud API, by using RFC1123Z
 type Time time.Time
 
@@ -107,6 +107,37 @@ type Hashes struct {
 	SHA1   string `json:"sha1"`
 	MD5    string `json:"md5"`
 	SHA256 string `json:"sha256"`
+}
+
+// FileTruncateResponse is the response from /file_truncate
+type FileTruncateResponse struct {
+	Error
+}
+
+// FileCloseResponse is the response from /file_close
+type FileCloseResponse struct {
+	Error
+}
+
+// FileOpenResponse is the response from /file_open
+type FileOpenResponse struct {
+	Error
+	Fileid         int64 `json:"fileid"`
+	FileDescriptor int64 `json:"fd"`
+}
+
+// FileChecksumResponse is the response from /file_checksum
+type FileChecksumResponse struct {
+	Error
+	MD5    string `json:"md5"`
+	SHA1   string `json:"sha1"`
+	SHA256 string `json:"sha256"`
+}
+
+// FilePWriteResponse is the response from /file_pwrite
+type FilePWriteResponse struct {
+	Error
+	Bytes int64 `json:"bytes"`
 }
 
 // UploadFileResponse is the response from /uploadfile

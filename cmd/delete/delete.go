@@ -1,3 +1,4 @@
+// Package delete provides the delete command.
 package delete
 
 import (
@@ -17,15 +18,14 @@ var (
 func init() {
 	cmd.Root.AddCommand(commandDefinition)
 	cmdFlags := commandDefinition.Flags()
-	flags.BoolVarP(cmdFlags, &rmdirs, "rmdirs", "", rmdirs, "rmdirs removes empty directories but leaves root intact")
+	flags.BoolVarP(cmdFlags, &rmdirs, "rmdirs", "", rmdirs, "rmdirs removes empty directories but leaves root intact", "")
 }
 
 var commandDefinition = &cobra.Command{
 	Use:   "delete remote:path",
 	Short: `Remove the files in path.`,
 	// Warning! "|" will be replaced by backticks below
-	Long: strings.ReplaceAll(`
-Remove the files in path.  Unlike [purge](/commands/rclone_purge/) it
+	Long: strings.ReplaceAll(`Remove the files in path.  Unlike [purge](/commands/rclone_purge/) it
 obeys include/exclude filters so can be used to selectively delete files.
 
 |rclone delete| only deletes files but leaves the directory structure
@@ -52,6 +52,10 @@ delete all files bigger than 100 MiB.
 **Important**: Since this can cause data loss, test first with the
 |--dry-run| or the |--interactive|/|-i| flag.
 `, "|", "`"),
+	Annotations: map[string]string{
+		"versionIntroduced": "v1.27",
+		"groups":            "Important,Filter,Listing",
+	},
 	Run: func(command *cobra.Command, args []string) {
 		cmd.CheckArgs(1, 1, command, args)
 		fsrc := cmd.NewFsSrc(args)

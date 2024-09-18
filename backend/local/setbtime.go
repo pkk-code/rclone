@@ -1,5 +1,4 @@
 //go:build !windows
-// +build !windows
 
 package local
 
@@ -9,7 +8,7 @@ import (
 
 const haveSetBTime = false
 
-// setBTime changes the the birth time of the file passed in
+// setBTime changes the birth time of the file passed in
 func setBTime(name string, btime time.Time) error {
 	// Does nothing
 	return nil

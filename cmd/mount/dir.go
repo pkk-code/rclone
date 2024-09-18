@@ -1,5 +1,4 @@
-//go:build linux || freebsd
-// +build linux freebsd
+//go:build linux
 
 package mount
 
@@ -31,10 +30,10 @@ var _ fusefs.Node = (*Dir)(nil)
 // Attr updates the attributes of a directory
 func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) (err error) {
 	defer log.Trace(d, "")("attr=%+v, err=%v", a, &err)
-	a.Valid = d.fsys.opt.AttrTimeout
+	a.Valid = time.Duration(d.fsys.opt.AttrTimeout)
 	a.Gid = d.VFS().Opt.GID
 	a.Uid = d.VFS().Opt.UID
-	a.Mode = os.ModeDir | d.VFS().Opt.DirPerms
+	a.Mode = os.ModeDir | os.FileMode(d.VFS().Opt.DirPerms)
 	modTime := d.ModTime()
 	a.Atime = modTime
 	a.Mtime = modTime
@@ -78,7 +77,7 @@ func (d *Dir) Lookup(ctx context.Context, req *fuse.LookupRequest, resp *fuse.Lo
 	if err != nil {
 		return nil, translateError(err)
 	}
-	resp.EntryValid = d.fsys.opt.AttrTimeout
+	resp.EntryValid = time.Duration(d.fsys.opt.AttrTimeout)
 	// Check the mnode to see if it has a fuse Node cached
 	// We must return the same fuse nodes for vfs Nodes
 	node, ok := mnode.Sys().(fusefs.Node)
@@ -250,7 +249,7 @@ func (d *Dir) Mknod(ctx context.Context, req *fuse.MknodRequest) (node fusefs.No
 	defer log.Trace(d, "name=%v, mode=%d, rdev=%d", req.Name, req.Mode, req.Rdev)("node=%v, err=%v", &node, &err)
 	if req.Rdev != 0 {
 		fs.Errorf(d, "Can't create device node %q", req.Name)
-		return nil, fuse.EIO
+		return nil, fuse.Errno(syscall.EIO)
 	}
 	var cReq = fuse.CreateRequest{
 		Name:  req.Name,

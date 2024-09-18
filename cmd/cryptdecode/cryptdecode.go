@@ -1,3 +1,4 @@
+// Package cryptdecode provides the cryptdecode command.
 package cryptdecode
 
 import (
@@ -19,15 +20,14 @@ var (
 func init() {
 	cmd.Root.AddCommand(commandDefinition)
 	cmdFlags := commandDefinition.Flags()
-	flags.BoolVarP(cmdFlags, &Reverse, "reverse", "", Reverse, "Reverse cryptdecode, encrypts filenames")
+	flags.BoolVarP(cmdFlags, &Reverse, "reverse", "", Reverse, "Reverse cryptdecode, encrypts filenames", "")
 }
 
 var commandDefinition = &cobra.Command{
 	Use:   "cryptdecode encryptedremote: encryptedfilename",
 	Short: `Cryptdecode returns unencrypted file names.`,
-	Long: `
-rclone cryptdecode returns unencrypted file names when provided with
-a list of encrypted file names. List limit is 10 items.
+	Long: `Returns unencrypted file names when provided with a list of encrypted file
+names. List limit is 10 items.
 
 If you supply the ` + "`--reverse`" + ` flag, it will return encrypted file names.
 
@@ -40,6 +40,9 @@ use it like this
 Another way to accomplish this is by using the ` + "`rclone backend encode` (or `decode`)" + ` command.
 See the documentation on the [crypt](/crypt/) overlay for more info.
 `,
+	Annotations: map[string]string{
+		"versionIntroduced": "v1.38",
+	},
 	Run: func(command *cobra.Command, args []string) {
 		cmd.CheckArgs(2, 11, command, args)
 		cmd.Run(false, false, command, func() error {

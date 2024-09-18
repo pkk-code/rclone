@@ -77,7 +77,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"path"
@@ -156,7 +155,7 @@ func init() {
 				CheckAuth:    checkAuth,
 			})
 		},
-		Options: []fs.Option{{
+		Options: append(oauthutil.SharedOptions, []fs.Option{{
 			Name:     "upload_cutoff",
 			Help:     "Cutoff for switching to multipart upload.",
 			Default:  defaultUploadCutoff,
@@ -183,6 +182,7 @@ standard values here or any folder ID (long hex number ID).`,
 				Value: "top",
 				Help:  "Access the home, favorites, and shared folders as well as the connectors.",
 			}},
+			Sensitive: true,
 		}, {
 			Name:    "chunk_size",
 			Default: defaultChunkSize,
@@ -217,7 +217,7 @@ be set manually to something like: https://XXX.sharefile.com
 				encoder.EncodeLeftSpace |
 				encoder.EncodeLeftPeriod |
 				encoder.EncodeInvalidUtf8),
-		}},
+		}}...),
 	})
 }
 
@@ -479,7 +479,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to open timezone db: %w", err)
 	}
-	tzdata, err := ioutil.ReadAll(timezone)
+	tzdata, err := io.ReadAll(timezone)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read timezone: %w", err)
 	}
@@ -776,8 +776,13 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	}
 }
 
-// PutStream uploads to the remote path with the modTime given of indeterminate size
-func (f *Fs) PutStream(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
+// FIXMEPutStream uploads to the remote path with the modTime given of indeterminate size
+//
+// PutStream no longer appears to work - the streamed uploads need the
+// size specified at the start otherwise we get this error:
+//
+//	upload failed: file size does not match (-2)
+func (f *Fs) FIXMEPutStream(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
 	return f.Put(ctx, in, src, options...)
 }
 
@@ -1171,6 +1176,12 @@ func (f *Fs) DirCacheFlush() {
 	f.dirCache.ResetRoot()
 }
 
+// Shutdown shutdown the fs
+func (f *Fs) Shutdown(ctx context.Context) error {
+	f.tokenRenewer.Shutdown()
+	return nil
+}
+
 // Hashes returns the supported hash sets.
 func (f *Fs) Hashes() hash.Set {
 	return hash.Set(hash.MD5)
@@ -1454,13 +1465,14 @@ func (o *Object) ID() string {
 
 // Check the interfaces are satisfied
 var (
-	_ fs.Fs              = (*Fs)(nil)
-	_ fs.Purger          = (*Fs)(nil)
-	_ fs.Mover           = (*Fs)(nil)
-	_ fs.DirMover        = (*Fs)(nil)
-	_ fs.Copier          = (*Fs)(nil)
-	_ fs.PutStreamer     = (*Fs)(nil)
+	_ fs.Fs       = (*Fs)(nil)
+	_ fs.Purger   = (*Fs)(nil)
+	_ fs.Mover    = (*Fs)(nil)
+	_ fs.DirMover = (*Fs)(nil)
+	_ fs.Copier   = (*Fs)(nil)
+	// _ fs.PutStreamer     = (*Fs)(nil)
 	_ fs.DirCacheFlusher = (*Fs)(nil)
+	_ fs.Shutdowner      = (*Fs)(nil)
 	_ fs.Object          = (*Object)(nil)
 	_ fs.IDer            = (*Object)(nil)
 )

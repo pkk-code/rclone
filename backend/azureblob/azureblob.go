@@ -541,24 +541,27 @@ type Options struct {
 
 // Fs represents a remote azure server
 type Fs struct {
-	name          string                       // name of this remote
-	root          string                       // the path we are working on if any
-	opt           Options                      // parsed config options
-	ci            *fs.ConfigInfo               // global config
-	features      *fs.Features                 // optional features
-	cntSVCcacheMu sync.Mutex                   // mutex to protect cntSVCcache
-	cntSVCcache   map[string]*container.Client // reference to containerClient per container
-	svc           *service.Client              // client to access azblob
-	cred          azcore.TokenCredential       // how to generate tokens (may be nil)
-	sharedKeyCred *service.SharedKeyCredential // shared key credentials (may be nil)
-	anonymous     bool                         // if this is anonymous access
-	rootContainer string                       // container part of root (if any)
-	rootDirectory string                       // directory part of root (if any)
-	isLimited     bool                         // if limited to one container
-	cache         *bucket.Cache                // cache for container creation status
-	pacer         *fs.Pacer                    // To pace and retry the API calls
-	uploadToken   *pacer.TokenDispenser        // control concurrency
-	publicAccess  container.PublicAccessType   // Container Public Access Level
+	name            string                       // name of this remote
+	root            string                       // the path we are working on if any
+	opt             Options                      // parsed config options
+	ci              *fs.ConfigInfo               // global config
+	features        *fs.Features                 // optional features
+	cntSVCcacheMu   sync.Mutex                   // mutex to protect cntSVCcache
+	cntSVCcache     map[string]*container.Client // reference to containerClient per container
+	svc             *service.Client              // client to access azblob
+	containerName   string                       // container Name
+	blobClient      *blob.Client                 // reference to blob Client
+	blobBlockClient *blockblob.Client            // reference to block blob client
+	cred            azcore.TokenCredential       // how to generate tokens (may be nil)
+	sharedKeyCred   *service.SharedKeyCredential // shared key credentials (may be nil)
+	anonymous       bool                         // if this is anonymous access
+	rootContainer   string                       // container part of root (if any)
+	rootDirectory   string                       // directory part of root (if any)
+	isLimited       bool                         // if limited to one container
+	cache           *bucket.Cache                // cache for container creation status
+	pacer           *fs.Pacer                    // To pace and retry the API calls
+	uploadToken     *pacer.TokenDispenser        // control concurrency
+	publicAccess    container.PublicAccessType   // Container Public Access Level
 }
 
 // Object describes an azure object
@@ -865,8 +868,18 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		}
 		endpoint := opt.SASURL
 		containerName := parts.ContainerName
-		// Check if we have container level SAS or account level SAS
-		if containerName != "" {
+		if parts.BlobName != "" {
+			// Blob level SAS
+			f.containerName = parts.ContainerName
+			f.blobClient, err = blob.NewClientWithNoCredential(endpoint, nil)
+			if err != nil {
+				return nil, fmt.Errorf("unable to create SAS URL for blob client: %w", err)
+			}
+			f.blobBlockClient, err = blockblob.NewClientWithNoCredential(endpoint, nil)
+			if err != nil {
+				return nil, fmt.Errorf("unable to create SAS URL for blob block client: %w", err)
+			}
+		} else if containerName != "" { // Check if we have container level SAS or account level SAS
 			// Container level SAS
 			if f.rootContainer != "" && containerName != f.rootContainer {
 				return nil, fmt.Errorf("container name in SAS URL (%q) and container provided in command (%q) do not match", containerName, f.rootContainer)
@@ -1106,6 +1119,9 @@ func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, info *contain
 		fs:     f,
 		remote: remote,
 	}
+	if f.containerName != "" {
+		o.remote = f.containerName
+	}
 	if info != nil {
 		err := o.decodeMetaDataFromBlob(info)
 		if err != nil {
@@ -1128,12 +1144,20 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 
 // getBlobSVC creates a blob client
 func (f *Fs) getBlobSVC(container, containerPath string) *blob.Client {
-	return f.cntSVC(container).NewBlobClient(containerPath)
+	if f.containerName == "" {
+		return f.cntSVC(container).NewBlobClient(containerPath)
+	} else {
+		return f.blobClient
+	}
 }
 
 // getBlockBlobSVC creates a block blob client
 func (f *Fs) getBlockBlobSVC(container, containerPath string) *blockblob.Client {
-	return f.cntSVC(container).NewBlockBlobClient(containerPath)
+	if f.containerName == "" {
+		return f.cntSVC(container).NewBlockBlobClient(containerPath)
+	} else {
+		return f.blobBlockClient
+	}
 }
 
 // updateMetadataWithModTime adds the modTime passed in to o.meta.
@@ -1502,6 +1526,9 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	fs := &Object{
 		fs:     f,
 		remote: src.Remote(),
+	}
+	if f.containerName != "" {
+		fs.remote = f.containerName
 	}
 	return fs, fs.Update(ctx, in, src, options...)
 }
@@ -1949,9 +1976,11 @@ func (f *Fs) copySinglepart(ctx context.Context, remote, dstContainer, dstPath s
 // If it isn't possible then return fs.ErrorCantCopy
 func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
 	dstContainer, dstPath := f.split(remote)
-	err := f.mkdirParent(ctx, remote)
-	if err != nil {
-		return nil, err
+	if f.containerName == "" {
+		err := f.mkdirParent(ctx, remote)
+		if err != nil {
+			return nil, err
+		}
 	}
 	srcObj, ok := src.(*Object)
 	if !ok {
@@ -2881,8 +2910,10 @@ type uploadInfo struct {
 // Prepare the object for upload
 func (o *Object) prepareUpload(ctx context.Context, src fs.ObjectInfo, options []fs.OpenOption) (ui uploadInfo, err error) {
 	container, containerPath := o.split()
-	if container == "" || containerPath == "" {
-		return ui, fmt.Errorf("can't upload to root - need a container")
+	if o.fs.containerName == "" {
+		if container == "" || containerPath == "" {
+			return ui, fmt.Errorf("can't upload to root - need a container")
+		}
 	}
 	// Create parent dir/bucket if not saving directory marker
 	metadataMu.Lock()

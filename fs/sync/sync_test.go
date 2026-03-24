@@ -658,7 +658,7 @@ func TestServerSideCopyOverSelf(t *testing.T) {
 	ctx = predictDstFromLogger(ctx)
 	err = CopyDir(ctx, FremoteCopy, r.Fremote, false)
 	require.NoError(t, err)
-	testLoggerVsLsf(ctx, r.Fremote, r.Flocal, operations.GetLoggerOpt(ctx).JSON, t)
+	testLoggerVsLsf(ctx, FremoteCopy, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 	fstest.CheckItems(t, FremoteCopy, file1)
 
 	file2 := r.WriteObject(ctx, "sub dir/hello world", "hello world again", t2)
@@ -667,7 +667,7 @@ func TestServerSideCopyOverSelf(t *testing.T) {
 	ctx = predictDstFromLogger(ctx)
 	err = CopyDir(ctx, FremoteCopy, r.Fremote, false)
 	require.NoError(t, err)
-	testLoggerVsLsf(ctx, r.Fremote, r.Flocal, operations.GetLoggerOpt(ctx).JSON, t)
+	testLoggerVsLsf(ctx, FremoteCopy, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 	fstest.CheckItems(t, FremoteCopy, file2)
 }
 
@@ -703,7 +703,7 @@ func TestServerSideMoveOverSelf(t *testing.T) {
 	ctx = predictDstFromLogger(ctx)
 	err = CopyDir(ctx, FremoteCopy, r.Fremote, false)
 	require.NoError(t, err)
-	testLoggerVsLsf(ctx, r.Fremote, r.Flocal, operations.GetLoggerOpt(ctx).JSON, t)
+	testLoggerVsLsf(ctx, FremoteCopy, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 	fstest.CheckItems(t, FremoteCopy, file1)
 
 	file2 := r.WriteObject(ctx, "sub dir/hello world", "hello world again", t2)
@@ -806,7 +806,7 @@ func TestSyncBasedOnCheckSum(t *testing.T) {
 
 // Create a file and sync it. Change the last modified date and the
 // file contents but not the size.  If we're only doing sync by size
-// only, we expect nothing to to be transferred on the second sync.
+// only, we expect nothing to be transferred on the second sync.
 func TestSyncSizeOnly(t *testing.T) {
 	ctx := context.Background()
 	ctx, ci := fs.AddConfig(ctx)
@@ -843,7 +843,7 @@ func TestSyncSizeOnly(t *testing.T) {
 }
 
 // Create a file and sync it. Keep the last modified date but change
-// the size.  With --ignore-size we expect nothing to to be
+// the size.  With --ignore-size we expect nothing to be
 // transferred on the second sync.
 func TestSyncIgnoreSize(t *testing.T) {
 	ctx := context.Background()
@@ -1301,6 +1301,7 @@ func TestSyncAfterRemovingAFileAndAddingAFileSubDirWithErrors(t *testing.T) {
 	err := Sync(ctx, r.Fremote, r.Flocal, false)
 	assert.Equal(t, fs.ErrorNotDeleting, err)
 	testLoggerVsLsf(ctx, r.Fremote, r.Flocal, operations.GetLoggerOpt(ctx).JSON, t)
+	accounting.GlobalStats().ResetCounters()
 
 	r.CheckLocalListing(
 		t,
@@ -1467,7 +1468,7 @@ func TestSyncWithUpdateOlder(t *testing.T) {
 	r.CheckRemoteItems(t, oneO, twoO, threeO, fourO)
 
 	ci.UpdateOlder = true
-	ci.ModifyWindow = fs.ModTimeNotSupported
+	ci.ModifyWindow = fs.Duration(fs.ModTimeNotSupported)
 
 	ctx = predictDstFromLogger(ctx)
 	err := Sync(ctx, r.Fremote, r.Flocal, false)
@@ -1497,7 +1498,7 @@ func testSyncWithMaxDuration(t *testing.T, cutoffMode fs.CutoffMode) {
 	}
 	r := fstest.NewRun(t)
 
-	maxDuration := 250 * time.Millisecond
+	maxDuration := fs.Duration(250 * time.Millisecond)
 	ci.MaxDuration = maxDuration
 	ci.CutoffMode = cutoffMode
 	ci.CheckFirst = true
@@ -1539,7 +1540,7 @@ func testSyncWithMaxDuration(t *testing.T, cutoffMode fs.CutoffMode) {
 	const maxTransferTime = 20 * time.Second
 
 	what := fmt.Sprintf("expecting elapsed time %v between %v and %v", elapsed, maxDuration, maxTransferTime)
-	assert.True(t, elapsed >= maxDuration, what)
+	assert.True(t, elapsed >= time.Duration(maxDuration), what)
 	assert.True(t, elapsed < maxTransferTime, what)
 }
 
@@ -3031,6 +3032,9 @@ func DstLsf(ctx context.Context, Fremote fs.Fs) *bytes.Buffer {
 
 	list.SetSeparator(";")
 	timeFormat := operations.FormatForLSFPrecision(Fremote.Precision())
+	if Fremote.Precision() == fs.ModTimeNotSupported {
+		timeFormat = "none"
+	}
 	list.AddModTime(timeFormat)
 	list.AddHash(hash.MD5)
 	list.AddSize()
@@ -3082,7 +3086,7 @@ func testLoggerVsLsf(ctx context.Context, fdst, fsrc fs.Fs, logger *bytes.Buffer
 			elements := bytes.Split(line, []byte(";"))
 			if len(elements) >= 2 {
 				if !canTestModtime {
-					elements[0] = []byte("")
+					elements[0] = []byte("none")
 				}
 				if !canTestHash {
 					elements[1] = []byte("")

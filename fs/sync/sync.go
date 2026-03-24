@@ -194,7 +194,7 @@ func newSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.Delete
 		return nil, err
 	}
 	if ci.MaxDuration > 0 {
-		s.maxDurationEndTime = time.Now().Add(ci.MaxDuration)
+		s.maxDurationEndTime = time.Now().Add(time.Duration(ci.MaxDuration))
 		fs.Infof(s.fdst, "Transfer session %v deadline: %s", ci.CutoffMode, s.maxDurationEndTime.Format("2006/01/02 15:04:05"))
 	}
 	// If a max session duration has been defined add a deadline
@@ -570,13 +570,11 @@ func (s *syncCopyMove) startTrackRenames() {
 	if !s.trackRenames {
 		return
 	}
-	s.trackRenamesWg.Add(1)
-	go func() {
-		defer s.trackRenamesWg.Done()
+	s.trackRenamesWg.Go(func() {
 		for o := range s.trackRenamesCh {
 			s.renameCheck = append(s.renameCheck, o)
 		}
-	}()
+	})
 }
 
 // This stops the background rename collection
@@ -593,12 +591,10 @@ func (s *syncCopyMove) startDeleters() {
 	if s.deleteMode != fs.DeleteModeDuring && s.deleteMode != fs.DeleteModeOnly {
 		return
 	}
-	s.deletersWg.Add(1)
-	go func() {
-		defer s.deletersWg.Done()
+	s.deletersWg.Go(func() {
 		err := operations.DeleteFilesWithBackupDir(s.ctx, s.deleteFilesCh, s.backupDir)
 		s.processError(err)
-	}()
+	})
 }
 
 // This stops the background deleters
@@ -743,7 +739,7 @@ func parseTrackRenamesStrategy(strategies string) (strategy trackRenamesStrategy
 	if len(strategies) == 0 {
 		return strategy, nil
 	}
-	for _, s := range strings.Split(strategies, ",") {
+	for s := range strings.SplitSeq(strategies, ",") {
 		switch s {
 		case "hash":
 			strategy |= trackRenamesStrategyHash

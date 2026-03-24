@@ -225,7 +225,7 @@ func fromTypes(set Set) (map[Type]hash.Hash, error) {
 // single multiwriter, where one write will update all
 // the hashers.
 func toMultiWriter(h map[Type]hash.Hash) io.Writer {
-	// Convert to to slice
+	// Convert to slice
 	var w = make([]io.Writer, 0, len(h))
 	for _, v := range h {
 		w = append(w, v)
@@ -410,7 +410,7 @@ func HelpString(indent int) string {
 	help.WriteString(padding)
 	help.WriteString("Supported hashes are:\n")
 	for _, h := range supported {
-		fmt.Fprintf(&help, "%s  * %v\n", padding, h.String())
+		fmt.Fprintf(&help, "%s- %v\n", padding, h.String())
 	}
 	return help.String()
 }

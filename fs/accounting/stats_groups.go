@@ -89,6 +89,7 @@ Returns the following values:
 {
 	"bytes": total transferred bytes since the start of the group,
 	"checks": number of files checked,
+	"deletedDirs": number of directories deleted,
 	"deletes" : number of files deleted,
 	"elapsedTime": time in floating point seconds since rclone was started,
 	"errors": number of errors,
@@ -176,6 +177,7 @@ Returns the following values:
 				"size": size of the file in bytes,
 				"bytes": total transferred bytes for this file,
 				"checked": if the transfer is only checked (skipped, deleted),
+				"what": the purpose of the transfer (transferring, deleting, checking, importing, hashing, merging, listing, moving, renaming),
 				"timestamp": integer representing millisecond unix epoch,
 				"error": string description of the error (empty if successful),
 				"jobid": id of the job that this transfer belongs to
@@ -384,12 +386,14 @@ func (sg *statsGroups) sum(ctx context.Context) *StatsInfo {
 			sum.checkQueueSize += stats.checkQueueSize
 			sum.transfers += stats.transfers
 			sum.transferring.merge(stats.transferring)
+			sum.transferQueue += stats.transferQueue
 			sum.transferQueueSize += stats.transferQueueSize
 			sum.listed += stats.listed
 			sum.renames += stats.renames
 			sum.renameQueue += stats.renameQueue
 			sum.renameQueueSize += stats.renameQueueSize
 			sum.deletes += stats.deletes
+			sum.deletesSize += stats.deletesSize
 			sum.deletedDirs += stats.deletedDirs
 			sum.inProgress.merge(stats.inProgress)
 			sum.startedTransfers = append(sum.startedTransfers, stats.startedTransfers...)
@@ -398,6 +402,10 @@ func (sg *statsGroups) sum(ctx context.Context) *StatsInfo {
 			stats.average.mu.Lock()
 			sum.average.speed += stats.average.speed
 			stats.average.mu.Unlock()
+			sum.serverSideCopies += stats.serverSideCopies
+			sum.serverSideCopyBytes += stats.serverSideCopyBytes
+			sum.serverSideMoves += stats.serverSideMoves
+			sum.serverSideMoveBytes += stats.serverSideMoveBytes
 		}
 		stats.mu.RUnlock()
 	}
